@@ -8,6 +8,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import type { DiscussionThread } from "@/types/discussion.types";
 import { cn } from "@/utils/utils";
 
+import { DiscussionModerMenu } from "./DiscussionModerMenu";
+
 interface DiscussionThreadCardProps {
     thread: DiscussionThread;
     /**
@@ -15,6 +17,26 @@ interface DiscussionThreadCardProps {
      * return a route string the router knows about.
      */
     hrefBuilder: (threadId: string) => string;
+    /**
+     * Number of replies the card should advertise. Optional — when
+     * omitted the card falls back to "0 replies" so it stays
+     * presentable in list contexts that haven't fetched reply counts.
+     */
+    replyCount?: number;
+    /**
+     * Whether the current viewer is the thread's author. Drives the
+     * own-content Edit/Delete entry in the moderation menu.
+     */
+    isAuthor?: boolean;
+    /**
+     * Whether the current viewer is a course moderator (teacher). Drives
+     * the Pin/Unpin + Delete-any menu entries.
+     */
+    isTeacher?: boolean;
+    onEdit?: (threadId: string) => void;
+    onDelete?: (threadId: string) => void;
+    onPin?: (threadId: string) => void;
+    onUnpin?: (threadId: string) => void;
 }
 
 /** A trimmed preview of the body — first non-empty line, capped at 200 chars. */
@@ -56,7 +78,19 @@ function initialsOf(id: string): string {
 export function DiscussionThreadCard({
     thread,
     hrefBuilder,
+    replyCount,
+    isAuthor,
+    isTeacher,
+    onEdit,
+    onDelete,
+    onPin,
+    onUnpin,
 }: DiscussionThreadCardProps) {
+    const displayedReplies =
+        typeof replyCount === "number" ? replyCount : 0;
+    const hasAnyModerAction = Boolean(
+        onDelete && (isAuthor || isTeacher),
+    ) || Boolean(isTeacher && (onPin || onUnpin)) || Boolean(onEdit && (isAuthor || isTeacher));
     return (
         <Link
             to={hrefBuilder(thread._id)}
@@ -108,11 +142,35 @@ export function DiscussionThreadCard({
                                         data-testid="discussion-reply-count"
                                     >
                                         <MessageSquare className="h-3 w-3" />
-                                        <span>0 replies</span>
+                                        <span>
+                                            {displayedReplies}{" "}
+                                            {displayedReplies === 1
+                                                ? "reply"
+                                                : "replies"}
+                                        </span>
                                     </span>
                                 </div>
                             </div>
                         </div>
+                        {hasAnyModerAction && (
+                            <DiscussionModerMenu
+                                itemKind="thread"
+                                canPin={Boolean(isTeacher)}
+                                canEdit={
+                                    Boolean(onEdit) &&
+                                    Boolean(isAuthor || isTeacher)
+                                }
+                                canDelete={
+                                    Boolean(onDelete) &&
+                                    Boolean(isAuthor || isTeacher)
+                                }
+                                pinned={thread.pinned}
+                                onEdit={() => onEdit?.(thread._id)}
+                                onDelete={() => onDelete?.(thread._id)}
+                                onPin={() => onPin?.(thread._id)}
+                                onUnpin={() => onUnpin?.(thread._id)}
+                            />
+                        )}
                     </div>
                 </CardHeader>
                 <CardContent className="pt-0 pb-4">

@@ -12,6 +12,12 @@ export interface DiscussionThread {
     courseId: string;
     cohortId: string;
     authorId: string;
+    /**
+     * Author's Firebase UID, exposed by the backend so the UI can decide
+     * whether a thread is "own content" without an extra lookup. The
+     * client compares this against `useAuthStore.user.uid`.
+     */
+    authorFirebaseUid?: string;
     title: string;
     body: string;
     pinned: boolean;
@@ -24,6 +30,7 @@ export interface DiscussionReply {
     _id: string;
     threadId: string;
     authorId: string;
+    authorFirebaseUid?: string;
     body: string;
     createdAt: string;
     updatedAt: string;
@@ -45,6 +52,28 @@ export interface CreateDiscussionBody {
     title: string;
     body: string;
     cohortId: string;
+}
+
+/**
+ * Body for `POST /discussions/:threadId/replies`. Mirrors `CreateReplyBody`.
+ */
+export interface CreateReplyBody {
+    body: string;
+}
+
+/**
+ * Body for `PATCH /discussions/:threadId`. Mirrors `UpdateThreadBody`.
+ */
+export interface UpdateThreadBody {
+    title?: string;
+    body?: string;
+}
+
+/**
+ * Body for `PATCH /discussions/:threadId/pin`. Mirrors `PinThreadBody`.
+ */
+export interface PinThreadBody {
+    pinned: boolean;
 }
 
 /**

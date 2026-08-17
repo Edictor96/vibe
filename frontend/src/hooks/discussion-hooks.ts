@@ -1,5 +1,5 @@
 /**
- * Typed client for the Milestone A discussionBoard backend.
+ * Typed client for the Milestone C discussionBoard backend.
  *
  * Matches the announcement-hooks pattern: raw `fetch` against
  * `${BASE_URL}/...` with an inlined `getAuthHeaders()` helper that reads the
@@ -7,23 +7,29 @@
  * for course-scoped features (announcements, peer reviews, HP system, …) —
  * do not substitute `lib/api-client.ts` here.
  *
- * Endpoints covered (view + create + read only — Milestone B):
+ * Endpoints covered (Milestone A + B + C):
  *   GET    /course/:courseId/discussions              → DiscussionThread[]
  *   POST   /course/:courseId/discussions              → DiscussionThread
  *   GET    /discussions/:threadId                     → DiscussionThreadDetail
- *
- * Reply / edit / delete / pin endpoints exist on the backend but are
- * intentionally NOT exposed here — they are Milestone C work.
+ *   PATCH  /discussions/:threadId                     → DiscussionThread (edit)
+ *   DELETE /discussions/:threadId                     → 204 (cascades replies)
+ *   PATCH  /discussions/:threadId/pin                 → DiscussionThread
+ *   POST   /discussions/:threadId/replies             → DiscussionReply
+ *   DELETE /replies/:replyId                          → 204
  */
 
 import { useCallback, useEffect, useState } from "react";
 
 import type {
     CreateDiscussionBody,
+    CreateReplyBody,
     DiscussionError,
     DiscussionErrorKind,
+    DiscussionReply,
     DiscussionThread,
     DiscussionThreadDetail,
+    PinThreadBody,
+    UpdateThreadBody,
 } from "@/types/discussion.types";
 
 const BASE_URL = (
@@ -353,4 +359,247 @@ export function useCreateDiscussionThread(
     );
 
     return { mutateAsync, isPending, error };
+}
+
+// =============================================================================
+// Create a reply  →  POST /discussions/:threadId/replies
+// =============================================================================
+
+export interface UseCreateDiscussionReplyResult {
+    mutateAsync: (body: CreateReplyBody) => Promise<DiscussionReply>;
+    isPending: boolean;
+    error: DiscussionError | null;
+}
+
+/**
+ * Post a reply to a thread. The hook returns the persisted reply so the
+ * caller can append it to the local list (the parent page triggers a
+ * refetch after success in the canonical flow, but the optimistic shape
+ * is also valid).
+ */
+export function useCreateDiscussionReply(
+    threadId: string | undefined | null,
+): UseCreateDiscussionReplyResult {
+    const [isPending, setIsPending] = useState(false);
+    const [error, setError] = useState<DiscussionError | null>(null);
+
+    const mutateAsync = useCallback(
+        async (body: CreateReplyBody): Promise<DiscussionReply> => {
+            if (!threadId) {
+                const err: DiscussionError = {
+                    kind: "validation",
+                    message: "No thread is currently selected.",
+                };
+                setError(err);
+                throw err;
+            }
+
+            setIsPending(true);
+            try {
+                const result = await request<DiscussionReply>(
+                    `/discussions/${threadId}/replies`,
+                    {
+                        method: "POST",
+                        body: JSON.stringify(body),
+                    },
+                );
+                setError(null);
+                return result;
+            } catch (err) {
+                const discussionErr = toDiscussionError(err);
+                setError(discussionErr);
+                throw discussionErr;
+            } finally {
+                setIsPending(false);
+            }
+        },
+        [threadId],
+    );
+
+    return { mutateAsync, isPending, error };
+}
+
+// =============================================================================
+// Delete reply  →  DELETE /replies/:replyId
+// =============================================================================
+
+export interface UseDeleteDiscussionReplyResult {
+    mutateAsync: (replyId: string) => Promise<void>;
+    isPending: boolean;
+    error: DiscussionError | null;
+}
+
+/**
+ * Hard-delete a reply. The caller is responsible for confirming the
+ * action in the UI — this hook does not show a confirmation dialog.
+ */
+export function useDeleteDiscussionReply(): UseDeleteDiscussionReplyResult {
+    const [isPending, setIsPending] = useState(false);
+    const [error, setError] = useState<DiscussionError | null>(null);
+
+    const mutateAsync = useCallback(async (replyId: string): Promise<void> => {
+        setIsPending(true);
+        try {
+            await request<void>(`/replies/${replyId}`, {
+                method: "DELETE",
+            });
+            setError(null);
+        } catch (err) {
+            const discussionErr = toDiscussionError(err);
+            setError(discussionErr);
+            throw discussionErr;
+        } finally {
+            setIsPending(false);
+        }
+    }, []);
+
+    return { mutateAsync, isPending, error };
+}
+
+// =============================================================================
+// Delete thread  →  DELETE /discussions/:threadId
+// =============================================================================
+
+export interface UseDeleteDiscussionThreadResult {
+    mutateAsync: (threadId: string) => Promise<void>;
+    isPending: boolean;
+    error: DiscussionError | null;
+}
+
+/**
+ * Hard-delete a thread (cascades to its replies). The caller is
+ * responsible for confirming the action in the UI.
+ */
+export function useDeleteDiscussionThread(): UseDeleteDiscussionThreadResult {
+    const [isPending, setIsPending] = useState(false);
+    const [error, setError] = useState<DiscussionError | null>(null);
+
+    const mutateAsync = useCallback(async (threadId: string): Promise<void> => {
+        setIsPending(true);
+        try {
+            await request<void>(`/discussions/${threadId}`, {
+                method: "DELETE",
+            });
+            setError(null);
+        } catch (err) {
+            const discussionErr = toDiscussionError(err);
+            setError(discussionErr);
+            throw discussionErr;
+        } finally {
+            setIsPending(false);
+        }
+    }, []);
+
+    return { mutateAsync, isPending, error };
+}
+
+// =============================================================================
+// Edit thread  →  PATCH /discussions/:threadId
+// =============================================================================
+
+export interface UseUpdateDiscussionThreadResult {
+    mutateAsync: (
+        threadId: string,
+        body: UpdateThreadBody,
+    ) => Promise<DiscussionThread>;
+    isPending: boolean;
+    error: DiscussionError | null;
+}
+
+/**
+ * Edit a thread's title and/or body. The backend enforces author-or-
+ * teacher-track; the UI should only surface this control to the same
+ * two groups.
+ */
+export function useUpdateDiscussionThread(): UseUpdateDiscussionThreadResult {
+    const [isPending, setIsPending] = useState(false);
+    const [error, setError] = useState<DiscussionError | null>(null);
+
+    const mutateAsync = useCallback(
+        async (
+            threadId: string,
+            body: UpdateThreadBody,
+        ): Promise<DiscussionThread> => {
+            setIsPending(true);
+            try {
+                const result = await request<DiscussionThread>(
+                    `/discussions/${threadId}`,
+                    {
+                        method: "PATCH",
+                        body: JSON.stringify(body),
+                    },
+                );
+                setError(null);
+                return result;
+            } catch (err) {
+                const discussionErr = toDiscussionError(err);
+                setError(discussionErr);
+                throw discussionErr;
+            } finally {
+                setIsPending(false);
+            }
+        },
+        [],
+    );
+
+    return { mutateAsync, isPending, error };
+}
+
+// =============================================================================
+// Pin / unpin thread  →  PATCH /discussions/:threadId/pin
+// =============================================================================
+
+export interface UsePinDiscussionThreadResult {
+    pin: (threadId: string) => Promise<DiscussionThread>;
+    unpin: (threadId: string) => Promise<DiscussionThread>;
+    isPending: boolean;
+    error: DiscussionError | null;
+}
+
+/**
+ * Convenience accessors for the pin / unpin moderation action. The
+ * backend exposes both via a single endpoint with `{pinned: boolean}`,
+ * so the hooks bundle the two convenience methods that the UI calls.
+ */
+export function usePinDiscussionThread(): UsePinDiscussionThreadResult {
+    const [isPending, setIsPending] = useState(false);
+    const [error, setError] = useState<DiscussionError | null>(null);
+
+    const setPin = useCallback(
+        async (
+            threadId: string,
+            body: PinThreadBody,
+        ): Promise<DiscussionThread> => {
+            setIsPending(true);
+            try {
+                const result = await request<DiscussionThread>(
+                    `/discussions/${threadId}/pin`,
+                    {
+                        method: "PATCH",
+                        body: JSON.stringify(body),
+                    },
+                );
+                setError(null);
+                return result;
+            } catch (err) {
+                const discussionErr = toDiscussionError(err);
+                setError(discussionErr);
+                throw discussionErr;
+            } finally {
+                setIsPending(false);
+            }
+        },
+        [],
+    );
+
+    const pin = useCallback(
+        (threadId: string) => setPin(threadId, {pinned: true}),
+        [setPin],
+    );
+    const unpin = useCallback(
+        (threadId: string) => setPin(threadId, {pinned: false}),
+        [setPin],
+    );
+
+    return { pin, unpin, isPending, error };
 }
