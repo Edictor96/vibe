@@ -872,6 +872,16 @@ export interface AuthenticatedUserEnrollements {
   courseId: string;
   versionId: string;
   role: 'STUDENT' | 'INSTRUCTOR' | 'MANAGER' | 'TA' | 'STAFF';
+  /**
+   * Cohorts the caller is scoped to inside this course. `null` means
+   * "unrestricted on this course" (admin / cohort-agnostic roles /
+   * legacy students whose row predates cohorts). `undefined` / missing
+   * is treated the same as `[]` (no cohort access).
+   *
+   * NOTE: Added by the Milestone A discussion-board integration —
+   * `DiscussionService` reads this on every cohort-scoping decision.
+   */
+  cohortIds?: ObjectId[] | null;
 }
 
 export interface AuthenticatedUser {
