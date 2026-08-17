@@ -11,6 +11,16 @@ export interface IDiscussionReplyRepository {
   ): Promise<IDiscussionReply[]>;
 
   /**
+   * Fetch a single reply by ID. Returns null when not found. Used by the
+   * Milestone C `DELETE /replies/:replyId` path to recover the parent
+   * thread for cohort-scope checks.
+   */
+  findById(
+    replyId: string,
+    session?: ClientSession,
+  ): Promise<IDiscussionReply | null>;
+
+  /**
    * Insert a new reply. Returns the inserted document.
    */
   create(

@@ -3,6 +3,7 @@ import {
   IsOptional,
   IsMongoId,
   IsNotEmpty,
+  IsBoolean,
   Matches,
   MaxLength,
 } from 'class-validator';
@@ -115,10 +116,39 @@ export class CreateReplyBody {
   body!: string;
 }
 
+/**
+ * Path params for routes pinned to a single reply (`DELETE /replies/:replyId`).
+ */
+export class ReplyIdParams {
+  @JSONSchema({
+    description: 'Unique identifier of the discussion reply',
+    type: 'string',
+  })
+  @IsMongoId()
+  @IsNotEmpty()
+  replyId!: string;
+}
+
+/**
+ * Body for `PATCH /discussions/:threadId/pin`. The boolean is required
+ * rather than optional so the API explicitly distinguishes "pin" from
+ * "unpin" — a missing field is a 400.
+ */
+export class PinThreadBody {
+  @JSONSchema({
+    description: 'Whether the thread should be pinned.',
+    type: 'boolean',
+  })
+  @IsBoolean({message: 'pinned must be a boolean'})
+  pinned!: boolean;
+}
+
 export const DISCUSSION_VALIDATORS = [
   CourseIdParams,
   ThreadIdParams,
+  ReplyIdParams,
   CreateThreadBody,
   UpdateThreadBody,
   CreateReplyBody,
+  PinThreadBody,
 ];

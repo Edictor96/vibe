@@ -20,6 +20,12 @@ export enum DiscussionActions {
   Update = 'update',
   Delete = 'delete',
   Reply = 'reply',
+  /**
+   * Pin / unpin a thread. Milestone C: only granted to teacher-track roles
+   * (INSTRUCTOR / MANAGER / TA / STAFF) on the thread's course. Students
+   * can never pin.
+   */
+  Pin = 'pin',
 }
 
 export type DiscussionSubjectType = 'Discussion';
@@ -32,12 +38,17 @@ export const DiscussionSubject = 'Discussion';
  * - `admin` may do anything across the whole platform.
  * - Every other authenticated user is gated by their enrollments on the
  *   course: a user with no enrollment gets no grants.
- * - INSTRUCTOR / MANAGER / TA get read + reply across all cohorts of their
- *   course(s). Moderation actions are intentionally NOT granted here —
- *   pin/unpin and teacher delete-any are deferred to a later milestone.
- * - STUDENT / STAFF get the same read + reply grants on their courses.
- *   Whether a student can read *another cohort's* thread is decided by
- *   `DiscussionService` at query time, not here.
+ * - INSTRUCTOR / MANAGER / TA / STAFF get the *teacher* track: every
+ *   cohort-scoped read / reply action, the `Pin` moderation action, AND
+ *   `manage`-level Update + Delete (so they can edit/delete any thread or
+ *   reply in their authorized cohort without the caller having to author
+ *   it). The cohort isolation done by `DiscussionService` keeps these
+ *   powers course-scoped — a teacher's "any" is still "any within their
+ *   authorised cohorts", never the whole platform.
+ * - STUDENT gets read + reply on their courses, plus Update/Delete on
+ *   resources they authored. Whether a student can read *another
+ *   cohort's* thread, and whether they can delete *another student's*
+ *   thread, is decided by `DiscussionService` at query time, not here.
  */
 export function setupDiscussionAbilities(
   builder: AbilityBuilder<any>,
@@ -69,8 +80,23 @@ export function setupDiscussionAbilities(
         can(DiscussionActions.View, DiscussionSubject, courseBounded);
         can(DiscussionActions.Reply, DiscussionSubject, courseBounded);
         can(DiscussionActions.Create, DiscussionSubject, courseBounded);
-        can(DiscussionActions.Update, DiscussionSubject, courseBounded);
-        can(DiscussionActions.Delete, DiscussionSubject, courseBounded);
+        // Teacher-track gets a `manage` over Update + Delete so they can
+        // edit/delete any thread or reply in their authorized course. The
+        // controller additionally enforces "author OR teacher" on Update,
+        // and "cohort readable" everywhere; course-scoping is what stops
+        // a teacher from moderating another course's discussions.
+        can(
+          DiscussionActions.Update,
+          DiscussionSubject,
+          courseBounded,
+        );
+        can(
+          DiscussionActions.Delete,
+          DiscussionSubject,
+          courseBounded,
+        );
+        // Pin / unpin is a moderator-only action.
+        can(DiscussionActions.Pin, DiscussionSubject, courseBounded);
         break;
 
       default:

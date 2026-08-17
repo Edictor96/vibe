@@ -40,12 +40,16 @@ export interface IDiscussionThreadRepository {
   ): Promise<IDiscussionThread>;
 
   /**
-   * Update title/body on an existing thread. Returns the updated document,
-   * or null if no thread matched the ID.
+   * Update title/body and/or the `pinned` flag on an existing thread.
+   * Returns the updated document, or null if no thread matched the ID.
+   *
+   * `pinned` is only set by the Milestone C `PATCH /discussions/:threadId/pin`
+   * endpoint; `title` / `body` are only set by the Milestone A edit path.
+   * The repo treats all fields as optional, so a partial update is fine.
    */
   update(
     threadId: string,
-    data: {title?: string; body?: string},
+    data: {title?: string; body?: string; pinned?: boolean},
     session?: ClientSession,
   ): Promise<IDiscussionThread | null>;
 

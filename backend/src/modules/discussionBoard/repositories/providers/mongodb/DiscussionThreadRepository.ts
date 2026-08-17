@@ -85,7 +85,7 @@ export class DiscussionThreadRepository implements IDiscussionThreadRepository {
 
   async update(
     threadId: string,
-    data: {title?: string; body?: string},
+    data: {title?: string; body?: string; pinned?: boolean},
     session?: ClientSession,
   ): Promise<IDiscussionThread | null> {
     await this.init();
@@ -97,6 +97,7 @@ export class DiscussionThreadRepository implements IDiscussionThreadRepository {
     const set: Record<string, unknown> = {updatedAt: new Date()};
     if (typeof data.title === 'string') set.title = data.title;
     if (typeof data.body === 'string') set.body = data.body;
+    if (typeof data.pinned === 'boolean') set.pinned = data.pinned;
 
     const result = await this._threads.findOneAndUpdate(
       {_id: new ObjectId(threadId)},

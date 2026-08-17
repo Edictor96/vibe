@@ -30,6 +30,8 @@ import {
   CourseIdParams,
   CreateReplyBody,
   CreateThreadBody,
+  PinThreadBody,
+  ReplyIdParams,
   ThreadIdParams,
   UpdateThreadBody,
 } from '../classes/validators/DiscussionValidators.js';
@@ -41,6 +43,27 @@ import {
   toThreadDetailResponse,
   toThreadResponse,
 } from '../classes/transformers/Discussion.js';
+
+/**
+ * Pulled from `routing-controllers`' `Ability` decorator — that's the
+ * raw auth user doc, which carries both the MongoDB `_id` (used as
+ * `AuthenticatedUser.userId` already) and the `firebaseUID` we want to
+ * denormalise onto new threads / replies for own-content UI checks.
+ *
+ * We accept it loosely via `any` because the shared decorator types
+ * `user` as the auth-shape but the runtime object is the underlying
+ * FirebaseAuthService user doc (which has `_id` + `firebaseUID`).
+ */
+type AuthUserRecord = {
+  _id?: unknown;
+  firebaseUID?: string;
+};
+
+function firebaseUidOf(
+  user: AuthUserRecord | undefined | null,
+): string | undefined {
+  return user?.firebaseUID ?? undefined;
+}
 
 @OpenAPI({
   tags: ['Discussions'],
@@ -75,7 +98,7 @@ export class DiscussionController {
   @ResponseSchema(BadRequestErrorResponse, {statusCode: 400})
   async listThreads(
     @Params() params: CourseIdParams,
-    @Ability(getDiscussionAbility) {ability, authenticatedUser},
+    @Ability(getDiscussionAbility) {ability, user, authenticatedUser},
   ): Promise<DiscussionThreadResponse[]> {
     const courseSubject = subject(DiscussionSubject, {
       courseId: params.courseId,
@@ -90,13 +113,14 @@ export class DiscussionController {
       params.courseId,
       authenticatedUser,
     );
-    return threads.map(toThreadResponse);
+    return threads.map(t => toThreadResponse(t, t.authorFirebaseUid));
   }
 
   /**
-   * Create a new thread. The `cohortId` in the body is treated as a request
-   * — the service re-checks it against the caller's authorised scope, so a
-   * student can't post into another cohort by tampering with the request.
+   * Create a new thread. The `cohortId` in the body is treated as a
+   * request — the service re-checks it against the caller's authorised
+   * scope, so a student can't post into another cohort by tampering with
+   * the request.
    */
   @Authorized()
   @Post('/course/:courseId/discussions')
@@ -105,7 +129,7 @@ export class DiscussionController {
     summary: 'Create a discussion thread',
     description:
       'Creates a thread in the requested cohort. The cohortId must be ' +
-      'inside the caller\'s authorised cohort scope for the course.',
+      "inside the caller's authorised cohort scope for the course.",
   })
   @ResponseSchema(DiscussionThreadResponse, {
     description: 'Thread created',
@@ -115,33 +139,28 @@ export class DiscussionController {
   async createThread(
     @Params() params: CourseIdParams,
     @Body() body: CreateThreadBody,
-    @Ability(getDiscussionAbility) {ability, authenticatedUser},
+    @Ability(getDiscussionAbility) {user, authenticatedUser},
   ): Promise<DiscussionThreadResponse> {
-    const courseSubject = subject(DiscussionSubject, {
-      courseId: params.courseId,
-    });
-    if (!ability.can(DiscussionActions.Create, courseSubject)) {
-      throw new ForbiddenError(
-        'You do not have permission to create discussions on this course',
-      );
-    }
-
     const created = await this._service.createThread(
       {
         courseId: params.courseId,
         cohortId: body.cohortId,
         title: body.title,
         body: body.body,
+        authorFirebaseUid: firebaseUidOf(user),
       },
       authenticatedUser,
     );
-
-    return toThreadResponse(created);
+    return toThreadResponse(
+      created,
+      created.authorFirebaseUid ?? firebaseUidOf(user),
+    );
   }
 
   /**
-   * Fetch one thread and its replies. Cross-cohort access returns the same
-   * NotFoundError a missing thread uses — see DiscussionService.
+   * Fetch a single thread + its replies. Cohorts the caller can't
+   * read return the same 404 the missing-thread path uses; see the
+   * service.
    */
   @Authorized()
   @Get('/discussions/:threadId')
@@ -169,15 +188,19 @@ export class DiscussionController {
   }
 
   /**
-   * Edit an existing thread. Only the author can edit for now; teacher
-   * moderation is deferred to a later milestone.
+   * Edit an existing thread. Author can edit their own thread; a
+   * teacher-track role on the thread's course can edit any thread in
+   * their cohort.
    */
   @Authorized()
   @Patch('/discussions/:threadId')
   @HttpCode(200)
   @OpenAPI({
     summary: 'Edit a discussion thread',
-    description: 'Edits the title and/or body of a thread you authored.',
+    description:
+      'Edits the title and/or body of a thread. The caller must be ' +
+      'the author, or a course moderator (teacher-track role) on ' +
+      "the thread's course.",
   })
   @ResponseSchema(DiscussionThreadResponse, {
     description: 'Updated thread',
@@ -194,12 +217,13 @@ export class DiscussionController {
       {title: body.title, body: body.body},
       authenticatedUser,
     );
-    return toThreadResponse(updated);
+    return toThreadResponse(updated, updated.authorFirebaseUid);
   }
 
   /**
-   * Delete a thread. Only the author can delete for now; teacher delete-any
-   * is deferred to a later milestone.
+   * Delete a thread (and cascade its replies). Author can delete their
+   * own thread; a teacher-track role on the thread's course can delete
+   * any thread in their cohort.
    */
   @Authorized()
   @Delete('/discussions/:threadId')
@@ -207,7 +231,9 @@ export class DiscussionController {
   @HttpCode(204)
   @OpenAPI({
     summary: 'Delete a discussion thread',
-    description: 'Deletes a thread you authored, along with its replies.',
+    description:
+      'Deletes a thread and cascades to its replies. The caller must ' +
+      'be the author, or a course moderator on the thread course.',
   })
   @ResponseSchema(BadRequestErrorResponse, {statusCode: 400})
   async deleteThread(
@@ -218,10 +244,40 @@ export class DiscussionController {
   }
 
   /**
-   * Post a reply to an existing thread.
-   *
-   * Edge cases (reply edit-permission, teacher moderation) are intentionally
-   * deferred — base plumbing only.
+   * Pin / unpin a thread. Teacher-only — anyone else (including the
+   * thread's own author) gets 403.
+   */
+  @Authorized()
+  @Patch('/discussions/:threadId/pin')
+  @HttpCode(200)
+  @OpenAPI({
+    summary: 'Pin or unpin a discussion thread',
+    description:
+      'Sets the pinned flag on a thread. Teacher-only — students get ' +
+      '403. The pin endpoint uses 403 (not 404) on denial because the ' +
+      "thread's existence isn't in question here.",
+  })
+  @ResponseSchema(DiscussionThreadResponse, {
+    description: 'Thread with the new pin state',
+    statusCode: 200,
+  })
+  @ResponseSchema(BadRequestErrorResponse, {statusCode: 400})
+  async pinThread(
+    @Params() params: ThreadIdParams,
+    @Body() body: PinThreadBody,
+    @Ability(getDiscussionAbility) {authenticatedUser},
+  ): Promise<DiscussionThreadResponse> {
+    const updated = await this._service.pinThread(
+      params.threadId,
+      {pinned: body.pinned},
+      authenticatedUser,
+    );
+    return toThreadResponse(updated, updated.authorFirebaseUid);
+  }
+
+  /**
+   * Post a reply to an existing thread. The thread must be in a cohort
+   * the caller can read (see `DiscussionService.createReply`).
    */
   @Authorized()
   @Post('/discussions/:threadId/replies')
@@ -229,8 +285,7 @@ export class DiscussionController {
   @OpenAPI({
     summary: 'Reply to a discussion thread',
     description:
-      'Posts a reply to a thread the caller is permitted to read. Edit ' +
-      'and moderation edge cases deepen in a later milestone.',
+      'Posts a reply to a thread the caller is permitted to read.',
   })
   @ResponseSchema(DiscussionReplyResponse, {
     description: 'Reply posted',
@@ -240,13 +295,36 @@ export class DiscussionController {
   async createReply(
     @Params() params: ThreadIdParams,
     @Body() body: CreateReplyBody,
-    @Ability(getDiscussionAbility) {authenticatedUser},
+    @Ability(getDiscussionAbility) {user, authenticatedUser},
   ): Promise<DiscussionReplyResponse> {
     const reply = await this._service.createReply(
       params.threadId,
-      {body: body.body},
+      {body: body.body, authorFirebaseUid: firebaseUidOf(user)},
       authenticatedUser,
     );
-    return toReplyResponse(reply);
+    return toReplyResponse(reply, reply.authorFirebaseUid);
+  }
+
+  /**
+   * Delete a single reply. Author can delete their own reply; a
+   * teacher-track role on the parent thread's course can delete any
+   * reply in their cohort.
+   */
+  @Authorized()
+  @Delete('/replies/:replyId')
+  @OnUndefined(204)
+  @HttpCode(204)
+  @OpenAPI({
+    summary: 'Delete a discussion reply',
+    description:
+      'Deletes a single reply. The caller must be the author, or a ' +
+      'course moderator on the parent thread course.',
+  })
+  @ResponseSchema(BadRequestErrorResponse, {statusCode: 400})
+  async deleteReply(
+    @Params() params: ReplyIdParams,
+    @Ability(getDiscussionAbility) {authenticatedUser},
+  ): Promise<void> {
+    await this._service.deleteReply(params.replyId, authenticatedUser);
   }
 }

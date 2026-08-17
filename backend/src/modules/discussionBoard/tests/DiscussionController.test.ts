@@ -592,4 +592,316 @@ describe('Discussion Controller — Milestone A cohort isolation', {timeout: 900
     expect(bodies.length).toBeGreaterThan(0);
     bodies.forEach(c => expect(c).toBe(cohortAId));
   });
+
+  // -------------------------------------------------------------------------
+  // Milestone C — replies, teacher moderation, own-content editing.
+  // Uses the same shared `app` and the same mock setup as the Milestone A
+  // block above, so each test can grab `courseId` / `cohortAId` from
+  // closure variables seeded in the `beforeAll`.
+  // -------------------------------------------------------------------------
+  describe('Milestone C replies + moderation', () => {
+  // Helpers used by every test below.
+  const createThread = async (
+    bearer: string,
+    title: string,
+    body: string,
+    cohortId: string,
+  ): Promise<string> => {
+    const created = await request(app)
+      .post(`/course/${courseId}/discussions`)
+      .set('authorization', `Bearer ${bearer}`)
+      .send({title, body, cohortId})
+      .expect(201);
+    return (created.body as {_id: string})._id;
+  };
+
+  const createReply = async (
+    bearer: string,
+    threadId: string,
+    replyBody: string,
+  ): Promise<string> => {
+    const created = await request(app)
+      .post(`/discussions/${threadId}/replies`)
+      .set('authorization', `Bearer ${bearer}`)
+      .send({body: replyBody})
+      .expect(201);
+    return (created.body as {_id: string})._id;
+  };
+
+  it('lets a teacher pin and unpin a thread', async () => {
+    const threadId = await createThread(
+      'studentA-token',
+      'Pin target',
+      'will be pinned',
+      cohortAId,
+    );
+
+    // Pin
+    const pinned = await request(app)
+      .patch(`/discussions/${threadId}/pin`)
+      .set('authorization', 'Bearer instructor-token')
+      .send({pinned: true})
+      .expect(200);
+    expect((pinned.body as {pinned: boolean}).pinned).toBe(true);
+
+    // Unpin
+    const unpinned = await request(app)
+      .patch(`/discussions/${threadId}/pin`)
+      .set('authorization', 'Bearer instructor-token')
+      .send({pinned: false})
+      .expect(200);
+    expect((unpinned.body as {pinned: boolean}).pinned).toBe(false);
+  });
+
+  it('rejects a student trying to pin a thread with 403', async () => {
+    const threadId = await createThread(
+      'studentA-token',
+      'Student pin target',
+      'try to pin',
+      cohortAId,
+    );
+
+    await request(app)
+      .patch(`/discussions/${threadId}/pin`)
+      .set('authorization', 'Bearer studentA-token')
+      .send({pinned: true})
+      .expect(403);
+  });
+
+  it('lets a teacher delete any thread in their authorized cohort', async () => {
+    const threadId = await createThread(
+      'studentA-token',
+      'Student-authored',
+      'teacher will moderate',
+      cohortAId,
+    );
+
+    // Teacher can delete even though they're not the author.
+    await request(app)
+      .delete(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer instructor-token')
+      .expect(204);
+
+    // Gone — same 404 even for the author.
+    await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(404);
+  });
+
+  it('lets a student delete their own reply', async () => {
+    const threadId = await createThread(
+      'studentA-token',
+      'Thread for own reply',
+      'reply me',
+      cohortAId,
+    );
+    const replyId = await createReply(
+      'studentA-token',
+      threadId,
+      'my own reply',
+    );
+
+    await request(app)
+      .delete(`/replies/${replyId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(204);
+
+    // Verify it's gone by re-fetching the thread detail.
+    const detail = await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(200);
+    expect((detail.body as {replies: unknown[]}).replies).toHaveLength(0);
+  });
+
+  it('lets a teacher delete any reply in their authorized cohort', async () => {
+    const threadId = await createThread(
+      'studentA-token',
+      'Thread for teacher reply delete',
+      'moderator test',
+      cohortAId,
+    );
+    const replyId = await createReply(
+      'studentA-token',
+      threadId,
+      'student reply',
+    );
+
+    await request(app)
+      .delete(`/replies/${replyId}`)
+      .set('authorization', 'Bearer instructor-token')
+      .expect(204);
+
+    const detail = await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(200);
+    expect((detail.body as {replies: unknown[]}).replies).toHaveLength(0);
+  });
+
+  it('blocks a student from deleting another student\'s reply with 404', async () => {
+    // student A authors a thread + reply.
+    const threadId = await createThread(
+      'studentA-token',
+      'Cross-student reply block',
+      'cohort A only',
+      cohortAId,
+    );
+    const replyId = await createReply(
+      'studentA-token',
+      threadId,
+      'private reply',
+    );
+
+    // student B is in a different cohort and never had a chance to
+    // even see this reply. The Milestone A 404 convention says:
+    // cross-cohort access is indistinguishable from a missing reply.
+    await request(app)
+      .delete(`/replies/${replyId}`)
+      .set('authorization', 'Bearer studentB-token')
+      .expect(404);
+
+    // The reply still exists for the author.
+    const detail = await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(200);
+    expect((detail.body as {replies: unknown[]}).replies).toHaveLength(1);
+
+    // Cleanup — author deletes their own reply.
+    await request(app)
+      .delete(`/replies/${replyId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(204);
+  });
+
+  it('rejects a student from deleting another student\'s thread with 404 (no leak)', async () => {
+    // student A authors a thread in cohort A.
+    const threadId = await createThread(
+      'studentA-token',
+      'Cross-cohort thread block',
+      'private to cohort A',
+      cohortAId,
+    );
+
+    // student B is in cohort B and never had access. The Milestone A
+    // 404 convention says: a cross-cohort access error returns the
+    // same status as a missing thread, so this is 404 not 403.
+    await request(app)
+      .delete(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentB-token')
+      .expect(404);
+
+    // Author can still see their thread.
+    await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(200);
+  });
+
+  it('cascade-deletes replies when the parent thread is deleted', async () => {
+    const threadId = await createThread(
+      'studentA-token',
+      'Thread for cascade test',
+      'replies will be removed when this is deleted',
+      cohortAId,
+    );
+
+    // Two replies from the author so the cascade has something to do.
+    await createReply('studentA-token', threadId, 'first reply');
+    await createReply('studentA-token', threadId, 'second reply');
+
+    // Confirm both replies are visible first.
+    const detail = await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(200);
+    expect((detail.body as {replies: unknown[]}).replies).toHaveLength(2);
+
+    // Delete the thread (author path).
+    await request(app)
+      .delete(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(204);
+
+    // The thread itself is gone.
+    const detailAfter = await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer studentA-token')
+      .expect(404);
+    expect(detailAfter.body).toHaveProperty('message');
+
+    // The replies are gone too — verify by reading the
+    // `discussion_replies` collection directly. This is the cascade
+    // assertion the spec asked for: deleting a thread also removes its
+    // replies.
+    const client = new (await import('mongodb')).MongoClient(
+      process.env.DB_URL!,
+    );
+    try {
+      await client.connect();
+      const replies = client
+        .db('vibe')
+        .collection('discussion_replies');
+      const orphaned = await replies
+        .find({threadId: new ObjectId(threadId)})
+        .toArray();
+      expect(orphaned).toHaveLength(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('lets a teacher-track user edit any thread in their authorized cohort', async () => {
+    // student A authors a thread; teacher edits the title.
+    const threadId = await createThread(
+      'studentA-token',
+      'Original title',
+      'original body',
+      cohortAId,
+    );
+
+    const edited = await request(app)
+      .patch(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer instructor-token')
+      .send({title: 'Moderator-edited title'})
+      .expect(200);
+
+    expect((edited.body as {title: string}).title).toBe(
+      'Moderator-edited title',
+    );
+    expect((edited.body as {body: string}).body).toBe('original body');
+  });
+
+  it('exposes authorFirebaseUid on threads and replies for the UI', async () => {
+    const threadId = await createThread(
+      'studentA-token',
+      'UID echo',
+      'echoes the firebase uid back',
+      cohortAId,
+    );
+    const detail = await request(app)
+      .get(`/discussions/${threadId}`)
+      .set('authorization', 'Bearer instructor-token')
+      .expect(200);
+
+    expect((detail.body as {thread: {authorFirebaseUid: string}}).thread)
+      .toHaveProperty('authorFirebaseUid');
+    expect(
+      (detail.body as {thread: {authorFirebaseUid: string}}).thread
+        .authorFirebaseUid,
+    ).toBe('studentA-firebase-uid');
+
+    // And once we post a reply, the reply carries it too.
+    const reply = await request(app)
+      .post(`/discussions/${threadId}/replies`)
+      .set('authorization', 'Bearer studentA-token')
+      .send({body: 'echo this'})
+      .expect(201);
+    expect(
+      (reply.body as {authorFirebaseUid: string}).authorFirebaseUid,
+    ).toBe('studentA-firebase-uid');
+  });
+});
 });

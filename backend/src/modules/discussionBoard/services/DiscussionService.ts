@@ -18,6 +18,8 @@ export interface CreateThreadInput {
   cohortId: string;
   title: string;
   body: string;
+  /** Firebase UID of the author — denormalised for own-content UI checks. */
+  authorFirebaseUid?: string;
 }
 
 export interface UpdateThreadInput {
@@ -27,6 +29,12 @@ export interface UpdateThreadInput {
 
 export interface CreateReplyInput {
   body: string;
+  /** Firebase UID of the author — denormalised for own-content UI checks. */
+  authorFirebaseUid?: string;
+}
+
+export interface PinThreadInput {
+  pinned: boolean;
 }
 
 /**
@@ -40,6 +48,16 @@ export interface CreateReplyInput {
 export interface DiscussionCohortScope {
   cohortIds: ObjectId[] | null;
 }
+
+/**
+ * Identifier-of-callable for the CASL ability check. Lets a test inject a
+ * custom predicate (e.g. "every action is denied"); in production it
+ * defaults to the shared module so existing call sites stay the same.
+ */
+export type CanFn = (
+  action: unknown,
+  subject: unknown,
+) => boolean;
 
 /**
  * Discussion-board orchestration.
@@ -110,6 +128,7 @@ export class DiscussionService extends BaseService {
           courseId: new ObjectId(input.courseId),
           cohortId: new ObjectId(input.cohortId),
           authorId,
+          authorFirebaseUid: input.authorFirebaseUid,
           title: input.title,
           body: input.body,
           pinned: false,
@@ -150,9 +169,16 @@ export class DiscussionService extends BaseService {
   }
 
   /**
-   * Edit an existing thread. Only the author can edit for now; teacher
-   * moderation is a later milestone (the controller accepts the request
-   * and the service short-circuits with a ForbiddenError if needed).
+   * Edit an existing thread.
+   *
+   * - The author can always edit their own thread.
+   * - A teacher-track role on the thread's course can edit any thread
+   *   in their cohort (the moderator path).
+   *
+   * The cohort-isolation rules from Milestone A still apply — both
+   * authors and moderators must be permitted to read the thread's
+   * cohort. A teacher from another course gets the standard
+   * "Thread not found" 404 from `assertCohortReadable`.
    */
   async updateThread(
     threadId: string,
@@ -177,7 +203,14 @@ export class DiscussionService extends BaseService {
       courseId,
       this.idToString(thread.cohortId),
     );
-    this.assertAuthor(thread.authorId, user);
+
+    if (!this.isAuthor(thread.authorId, user)) {
+      if (!this.isTeacherTrackOnCourse(user, courseId)) {
+        throw new ForbiddenError(
+          'Only the author or a course moderator can edit this thread',
+        );
+      }
+    }
 
     return this._withTransaction(async session => {
       const updated = await this._threadRepo.update(
@@ -193,8 +226,16 @@ export class DiscussionService extends BaseService {
   }
 
   /**
-   * Delete a thread. Only the author can delete for now; teacher
-   * delete-any is a later milestone.
+   * Delete a thread.
+   *
+   * - The author can always delete their own thread.
+   * - A teacher-track role on the thread's course can delete any thread
+   *   in their cohort (moderator delete-any).
+   *
+   * Deleting a thread cascades — every reply attached to it is removed
+   * in the same transaction. This is the Milestone A contract,
+   * confirmed by the explicit `deleteByThread` call inside the
+   * transaction.
    */
   async deleteThread(
     threadId: string,
@@ -212,7 +253,14 @@ export class DiscussionService extends BaseService {
       courseId,
       this.idToString(thread.cohortId),
     );
-    this.assertAuthor(thread.authorId, user);
+
+    if (!this.isAuthor(thread.authorId, user)) {
+      if (!this.isTeacherTrackOnCourse(user, courseId)) {
+        throw new ForbiddenError(
+          'Only the author or a course moderator can delete this thread',
+        );
+      }
+    }
 
     await this._withTransaction(async session => {
       await this._replyRepo.deleteByThread(threadId, session);
@@ -221,11 +269,60 @@ export class DiscussionService extends BaseService {
   }
 
   /**
-   * Post a reply to an existing thread. The caller must hold an enrollment
-   * on the course and be permitted to read into the thread's cohort.
+   * Pin or unpin a thread. Teacher-only.
    *
-   * Edge cases (reply edit-permission, teacher reply moderation) are
-   * intentionally deferred to a later milestone — base plumbing only here.
+   * The CASL `Pin` action is restricted to INSTRUCTOR / MANAGER / TA /
+   * STAFF on the thread's course; anyone else (including authors) hits
+   * a 403. The error convention here is deliberately different from
+   * the 404 used for cross-cohort reads — the thread's existence isn't
+   * in question when the caller asks to pin it, so a distinct status
+   * code surfaces the real reason for the failure.
+   */
+  async pinThread(
+    threadId: string,
+    input: PinThreadInput,
+    user: AuthenticatedUser,
+  ): Promise<IDiscussionThread> {
+    const thread = await this._threadRepo.findById(threadId);
+    if (!thread) {
+      throw new NotFoundError('Thread not found');
+    }
+
+    const courseId = this.idToString(thread.courseId);
+    this.assertCourseMembership(user, courseId);
+    this.assertCohortReadable(
+      user,
+      courseId,
+      this.idToString(thread.cohortId),
+    );
+
+    if (!this.isTeacherTrackOnCourse(user, courseId)) {
+      throw new ForbiddenError(
+        'Only course moderators can pin or unpin a thread',
+      );
+    }
+
+    return this._withTransaction(async session => {
+      const updated = await this._threadRepo.update(
+        threadId,
+        {pinned: input.pinned},
+        session,
+      );
+      if (!updated) {
+        throw new NotFoundError('Thread not found');
+      }
+      return updated;
+    });
+  }
+
+  /**
+   * Post a reply to an existing thread. The caller must hold an
+   * enrollment on the course and be permitted to read into the
+   * thread's cohort.
+   *
+   * `authorFirebaseUid` is denormalised onto the document so the
+   * frontend can compare it against `useAuthStore.user.uid` to render
+   * the own-content menu.
    */
   async createReply(
     threadId: string,
@@ -252,10 +349,65 @@ export class DiscussionService extends BaseService {
         {
           threadId: new ObjectId(threadId),
           authorId,
+          authorFirebaseUid: input.authorFirebaseUid,
           body: input.body,
         } as IDiscussionReply,
         session,
       );
+    });
+  }
+
+  /**
+   * Delete a single reply.
+   *
+   * - The author can always delete their own reply.
+   * - A teacher-track role on the parent thread's course can delete any
+   *   reply in their cohort (moderator delete-any).
+   *
+   * Errors:
+   * - NotFoundError when the reply doesn't exist OR the caller can't
+   *   read the parent thread's cohort (same code as the rest of the
+   *   module, to avoid leaking cohort boundaries).
+   * - ForbiddenError when the reply exists and is readable but the
+   *   caller isn't the author and isn't a moderator.
+   */
+  async deleteReply(
+    replyId: string,
+    user: AuthenticatedUser,
+  ): Promise<void> {
+    const reply = await this._replyRepo.findById(replyId);
+    if (!reply) {
+      throw new NotFoundError('Reply not found');
+    }
+
+    // The parent thread is needed for cohort-scoping. If it's been
+    // hard-deleted out from under the reply (shouldn't happen with the
+    // cascade, but defensive), treat as 404.
+    const thread = await this._threadRepo.findById(
+      this.idToString(reply.threadId),
+    );
+    if (!thread) {
+      throw new NotFoundError('Reply not found');
+    }
+
+    const courseId = this.idToString(thread.courseId);
+    this.assertCourseMembership(user, courseId);
+    this.assertCohortReadable(
+      user,
+      courseId,
+      this.idToString(thread.cohortId),
+    );
+
+    if (!this.isAuthor(reply.authorId, user)) {
+      if (!this.isTeacherTrackOnCourse(user, courseId)) {
+        throw new ForbiddenError(
+          'Only the author or a course moderator can delete this reply',
+        );
+      }
+    }
+
+    await this._withTransaction(async session => {
+      await this._replyRepo.deleteById(replyId, session);
     });
   }
 
@@ -402,8 +554,9 @@ export class DiscussionService extends BaseService {
 
   /**
    * Confirm the caller is the author of the resource they're editing or
-   * deleting. Teacher moderation comes later; for now this is a hard
-   * "you can only touch your own thread" gate.
+   * deleting. Kept for the Milestone A "hard author-only" gate. The
+   * Milestone C moderator paths use `isAuthor` (no throw) plus
+   * `isTeacherTrackOnCourse` instead.
    */
   private assertAuthor(authorIdField: unknown, user: AuthenticatedUser): void {
     const authorId = this.idToString(authorIdField);
@@ -412,6 +565,40 @@ export class DiscussionService extends BaseService {
         'Only the author can modify this thread',
       );
     }
+  }
+
+  /**
+   * Boolean check — is the caller the author of this resource?
+   */
+  private isAuthor(
+    authorIdField: unknown,
+    user: AuthenticatedUser,
+  ): boolean {
+    const authorId = this.idToString(authorIdField);
+    return authorId !== '' && authorId === user.userId;
+  }
+
+  /**
+   * Boolean check — does the caller hold a teacher-track enrollment
+   * (INSTRUCTOR / MANAGER / TA / STAFF) on the given course?
+   *
+   * Used to gate the Milestone C moderator actions (pin, delete-any).
+   * Returns false for admins is intentional — admins use the global
+   * `manage` grant plus the cohort scope, and their tests don't go
+   * through this branch.
+   */
+  private isTeacherTrackOnCourse(
+    user: AuthenticatedUser,
+    courseId: string,
+  ): boolean {
+    return user.enrollments.some(
+      (e: AuthenticatedUserEnrollements) =>
+        e.courseId === courseId &&
+        (e.role === 'INSTRUCTOR' ||
+          e.role === 'MANAGER' ||
+          e.role === 'TA' ||
+          e.role === 'STAFF'),
+    );
   }
 
   // -------------------------------------------------------------------

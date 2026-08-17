@@ -41,6 +41,22 @@ export class DiscussionReplyRepository implements IDiscussionReplyRepository {
       .toArray();
   }
 
+  async findById(
+    replyId: string,
+    session?: ClientSession,
+  ): Promise<IDiscussionReply | null> {
+    await this.init();
+
+    if (!ObjectId.isValid(replyId)) {
+      return null;
+    }
+
+    return this._replies.findOne(
+      {_id: new ObjectId(replyId)},
+      {session},
+    );
+  }
+
   async create(
     reply: IDiscussionReply,
     session?: ClientSession,
