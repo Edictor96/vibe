@@ -6,6 +6,7 @@ import { LogOut, Settings, Sun, Moon } from "lucide-react"
 import { useTheme } from "next-themes"
 import { useAuthStore } from "@/store/auth-store"
 import { useUserEnrollments } from "@/hooks/hooks"
+import { useCourseStore } from "@/store/course-store"
 import { useNewAnnouncementIndicator } from "@/hooks/use-new-announcement-indicator"
 import { logout } from "@/utils/auth"
 import { AuroraText } from "@/components/magicui/aurora-text"
@@ -43,6 +44,15 @@ export function StudentSidebar() {
     (e) => e.hpSystem === true && e.status === "ACTIVE" && e.percentCompleted !== 100,
   )
 
+  // Discussion entry is course-scoped — only shown when a course is in context.
+  // The URL is dynamic so we resolve it from `useCourseStore.currentCourse`
+  // at render time and pass it through `item.to` (already overridden below).
+  const { currentCourse } = useCourseStore();
+  const hasCurrentCourse = !!currentCourse?.courseId;
+  const discussionHref = currentCourse?.courseId
+    ? `/student/courses/${currentCourse.courseId}/discussions`
+    : "/student/courses/";
+
   const isActive = (path: string) =>
     path === "/student" ? pathname === "/student" : pathname === path || pathname.startsWith(path + "/")
 
@@ -51,9 +61,11 @@ export function StudentSidebar() {
     navigate({ to: "/auth" })
   }
 
-  const visibleItems = STUDENT_NAV_ITEMS.filter(
-    (item) => item.requires !== "hpSystem" || hasHpSystem,
-  )
+  const visibleItems = STUDENT_NAV_ITEMS.filter((item) => {
+    if (item.requires === "hpSystem") return hasHpSystem;
+    if (item.requires === "currentCourse") return hasCurrentCourse;
+    return true;
+  });
 
   // One flat yellow for hover/active/press — the active:* + ring overrides kill
   // the default amber "sidebar-accent" press shade so clicking never flashes orange.
@@ -95,6 +107,8 @@ export function StudentSidebar() {
                 {visibleItems.map((item) => {
                   const Icon = item.icon
                   const showDot = item.indicator === "announcements" && hasNewAnnouncements
+                  // Resolve the discussion entry's dynamic URL on render.
+                  const resolvedTo = item.key === "discussion" ? discussionHref : item.to
                   return (
                     <SidebarMenuItem key={item.key}>
                       <SidebarMenuButton
@@ -104,7 +118,7 @@ export function StudentSidebar() {
                         onClick={item.indicator === "announcements" ? markAnnouncementsSeen : undefined}
                         className={`h-10 [&>svg]:size-5 ${yellowItem}`}
                       >
-                        <Link to={item.to} className="relative">
+                        <Link to={resolvedTo} className="relative">
                           <Icon className="size-5" />
                           <span>{item.title}</span>
                           {showDot && (

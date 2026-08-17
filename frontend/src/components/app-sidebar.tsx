@@ -2,17 +2,9 @@
 
 import * as React from "react"
 import {
-  Bell,
   BookOpen,
-  Bot,
-  Command,
-  Frame,
-  GalleryVerticalEnd,
-  Map,
   Megaphone,
-  PieChart,
-  Settings2,
-  Shield,
+  MessagesSquare,
   SquareTerminal,
 } from "lucide-react"
 
@@ -31,11 +23,20 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { useAuthStore } from "@/store/auth-store"
+import { useCourseStore } from "@/store/course-store"
 
 export function AppSidebar() {
   // Set default state to "expanded"
   const { state } = useSidebar()
   const { user } = useAuthStore.getState()
+  const { currentCourse } = useCourseStore()
+
+  // Discussion is course-scoped — only render the nav entry when a course
+  // is in context. The URL is dynamic, so the entry is added below via the
+  // resolved-href pattern (`resolveHref` on NavMain).
+  const discussionHref = currentCourse?.courseId
+    ? `/teacher/courses/${currentCourse.courseId}/discussions`
+    : null
 
   const data = {
     user: {
@@ -43,11 +44,6 @@ export function AppSidebar() {
       avatar: user?.avatar,
     },
     navMain: [
-      // {
-      //   title: "Dashboard",
-      //   url: "/teacher",
-      //   icon: PieChart,
-      // },
       {
         title: "Courses",
         url: "#",
@@ -62,16 +58,24 @@ export function AppSidebar() {
         url: "/teacher/announcements",
         icon: Megaphone,
       },
+      // Course-scoped Discussion entry — added only when a course is open.
+      // `url` is the path prefix that all discussion sub-routes share so
+      // `NavMain`'s `pathname.startsWith` check still produces an active
+      // state on both list and thread pages.
+      ...(discussionHref
+        ? [
+            {
+              title: "Discussion",
+              url: "/teacher/courses/",
+              icon: MessagesSquare,
+            },
+          ]
+        : []),
       {
         title: "HP System",
         url: "/teacher/hp-system",
         icon: SquareTerminal,
       },
-      // {
-      //   title: "Notifications",
-      //   url: "/teacher/notifications",
-      //   icon: Bell,
-      // },
     ],
   }
 
@@ -96,7 +100,17 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent>
-        <NavMain items={data.navMain} />
+        <NavMain
+          items={data.navMain}
+          resolveHref={item =>
+            // The discussion entry only appears with a real courseId;
+            // resolve the placeholder URL to the active course's discussion
+            // list so the link actually navigates somewhere real.
+            item.title === "Discussion" && discussionHref
+              ? discussionHref
+              : item.url
+          }
+        />
       </SidebarContent>
 
       <SidebarFooter>
