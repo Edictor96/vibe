@@ -15,10 +15,6 @@ import { DiscussionErrorState } from "./DiscussionErrorState";
 
 interface ThreadViewProps {
     threadId: string;
-    /**
-     * URL for the "Back to list" link — the parent page supplies this so
-     * the threaded route knows its sibling route shape.
-     */
     listHref: string;
 }
 
@@ -32,55 +28,14 @@ function formatDate(iso: string): string {
         hour: "2-digit",
         minute: "2-digit",
     });
-/**
- * Detail page for a single thread — title, author, body. The replies slot
- * is rendered as an empty stub here (Milestone C will wire the real list
- * + composer) so the layout doesn't shift later.
- */
-export function ThreadView({ threadId, listHref }: ThreadViewProps) {
-    const { data, isLoading, error, refetch } = useDiscussionThread(threadId);
-    const thread = data?.thread;
-    const replies = data?.replies ?? [];
+}
 
-    return (
-        <div className="flex-1 min-w-0">
-            <div className="space-y-6">
-                <Button
-                    variant="ghost"
-                    size="sm"
-                    asChild
-                    className="gap-2 -ml-2 text-muted-foreground"
-                    data-testid="discussion-back-to-list"
-                >
-                    <Link to={listHref as any}>
-                        <ArrowLeft className="h-4 w-4" />
-                        Back to discussions
-                    </Link>
-                </Button>
-
-                {isLoading ? (
-                    <ThreadViewSkeleton />
-                ) : error ? (
-                    <DiscussionErrorState error={error} onRetry={refetch} />
-                ) : !thread ? (
-                    <DiscussionErrorState
-                        error={{
-                            kind: "not_found",
-                            message: "This thread could not be found.",
-                        }}
-                    />
-                ) : (
-/**
- * Renders the populated thread detail card + the (empty-stub) replies slot.
- * Pulled out so the parent component's conditional stays readable.
- */
-function ThreadBody({
-    thread,
-    replies,
-}: {
-    thread: DiscussionThread;
-    replies: DiscussionReply[];
-}) {
+function initialsOf(id: string): string {
+    const s = id.replace(/[^a-zA-Z]/g, "");
+    const out = (s.length >= 2 ? s.slice(0, 2) : s).toUpperCase();
+    return out.length > 0 ? out : "??";
+}
+function renderThreadBody(thread: DiscussionThread, replies: DiscussionReply[]) {
     return (
         <>
             <Card data-testid="discussion-thread-detail">
@@ -89,7 +44,7 @@ function ThreadBody({
                         <div className="flex gap-3 items-start min-w-0 flex-1">
                             <Avatar className="h-10 w-10 border border-border/30 shrink-0">
                                 <AvatarImage
-                                    src={`https://api.dicebear.com/7.x/initials/svg?seed=${thread.authorId}`}
+                                    src={"https://api.dicebear.com/7.x/initials/svg?seed=" + thread.authorId}
                                     alt=""
                                 />
                                 <AvatarFallback className="bg-gradient-to-br from-primary/15 to-primary/5 text-primary text-xs font-bold">
@@ -104,7 +59,7 @@ function ThreadBody({
                                     >
                                         {thread.title}
                                     </h1>
-                                    {thread.pinned && (
+                                    {thread.pinned ? (
                                         <Badge
                                             variant="secondary"
                                             className="gap-1 text-[10px] h-5 px-1.5 shrink-0"
@@ -112,7 +67,7 @@ function ThreadBody({
                                             <Pin className="h-3 w-3" />
                                             Pinned
                                         </Badge>
-                                    )}
+                                    ) : null}
                                 </div>
                                 <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1 flex-wrap">
                                     <span
@@ -136,17 +91,12 @@ function ThreadBody({
                     </div>
                 </CardContent>
             </Card>
-
-            <RepliesSlot count={replies.length} />
+            <RepliesStub count={replies.length} />
         </>
     );
 }
-/**
- * Empty stub for the replies list / composer — live wiring is in Milestone C.
- * Rendered as soon as the thread itself is loaded so the surrounding layout
- * doesn't shift later.
- */
-function RepliesSlot({ count }: { count: number }) {
+
+function RepliesStub({ count }: { count: number }) {
     return (
         <Card
             className="border-2 border-dashed bg-muted/20"
@@ -157,7 +107,7 @@ function RepliesSlot({ count }: { count: number }) {
                 <h3 className="text-base font-semibold text-muted-foreground">
                     {count === 0
                         ? "No replies yet"
-                        : `${count} ${count === 1 ? "reply" : "replies"}`}
+                        : count + " " + (count === 1 ? "reply" : "replies")}
                 </h3>
                 <p className="text-sm text-muted-foreground/80 max-w-sm mx-auto mt-1">
                     Reply posting and moderation arrive in the next milestone.
@@ -167,7 +117,6 @@ function RepliesSlot({ count }: { count: number }) {
     );
 }
 
-/** Skeleton for the thread detail page — shown while we fetch the thread. */
 function ThreadViewSkeleton() {
     return (
         <div
@@ -199,6 +148,45 @@ function ThreadViewSkeleton() {
                     <Skeleton className="h-3 w-2/3 mx-auto" />
                 </CardContent>
             </Card>
+        </div>
+    );
+}
+
+export function ThreadView({ threadId, listHref }: ThreadViewProps) {
+    const { data, isLoading, error, refetch } = useDiscussionThread(threadId);
+    const thread = data ? data.thread : null;
+    const replies = data ? data.replies : [];
+
+    return (
+        <div className="flex-1 min-w-0">
+            <div className="space-y-6">
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    asChild
+                    className="gap-2 -ml-2 text-muted-foreground"
+                    data-testid="discussion-back-to-list"
+                >
+                    <Link to={listHref as any}>
+                        <ArrowLeft className="h-4 w-4" />
+                        Back to discussions
+                    </Link>
+                </Button>
+                {isLoading ? (
+                    <ThreadViewSkeleton />
+                ) : error ? (
+                    <DiscussionErrorState error={error} onRetry={refetch} />
+                ) : thread ? (
+                    renderThreadBody(thread, replies)
+                ) : (
+                    <DiscussionErrorState
+                        error={{
+                            kind: "not_found",
+                            message: "This thread could not be found.",
+                        }}
+                    />
+                )}
+            </div>
         </div>
     );
 }
