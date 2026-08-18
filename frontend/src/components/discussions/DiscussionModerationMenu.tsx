@@ -36,7 +36,7 @@ import {
  * Click handling is forwarded from the parent so it can stop
  * propagation (the surrounding `<Link>` would otherwise navigate).
  */
-interface DiscussionModerMenuProps {
+interface DiscussionModerationMenuProps {
     /** Whether the caller can pin / unpin this thread. Teacher-only. */
     canPin?: boolean;
     /** Whether the caller can edit this thread / reply. Author or teacher. */
@@ -53,7 +53,7 @@ interface DiscussionModerMenuProps {
     onUnpin?: () => void;
 }
 
-export function DiscussionModerMenu({
+export function DiscussionModerationMenu({
     canPin,
     canEdit,
     canDelete,
@@ -63,7 +63,7 @@ export function DiscussionModerMenu({
     onDelete,
     onPin,
     onUnpin,
-}: DiscussionModerMenuProps) {
+}: DiscussionModerationMenuProps) {
     const hasAnything = Boolean(
         canPin || canEdit || canDelete,
     );

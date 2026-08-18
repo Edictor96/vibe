@@ -4,7 +4,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import type { DiscussionReply } from "@/types/discussion.types";
 
-import { DiscussionModerMenu } from "./DiscussionModerMenu";
+import { DiscussionModerationMenu } from "./DiscussionModerationMenu";
 
 interface ReplyListProps {
     replies: DiscussionReply[];
@@ -140,7 +140,7 @@ function ReplyRow({reply, canEdit, canDelete, onDelete}: ReplyRowProps) {
                                     {reply.body}
                                 </p>
                             </div>
-                            <DiscussionModerMenu
+                            <DiscussionModerationMenu
                                 itemKind="reply"
                                 canEdit={canEdit}
                                 canDelete={canDelete}

@@ -8,7 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import type { DiscussionThread } from "@/types/discussion.types";
 import { cn } from "@/utils/utils";
 
-import { DiscussionModerMenu } from "./DiscussionModerMenu";
+import { DiscussionModerationMenu } from "./DiscussionModerationMenu";
 
 interface DiscussionThreadCardProps {
     thread: DiscussionThread;
@@ -153,7 +153,7 @@ export function DiscussionThreadCard({
                             </div>
                         </div>
                         {hasAnyModerAction && (
-                            <DiscussionModerMenu
+                            <DiscussionModerationMenu
                                 itemKind="thread"
                                 canPin={Boolean(isTeacher)}
                                 canEdit={

@@ -23,7 +23,7 @@ import { toast } from "sonner";
 
 import ConfirmationModal from "@/app/pages/teacher/components/confirmation-modal";
 import { DiscussionErrorState } from "./DiscussionErrorState";
-import { DiscussionModerMenu } from "./DiscussionModerMenu";
+import { DiscussionModerationMenu } from "./DiscussionModerationMenu";
 import { EditThreadForm } from "./EditThreadForm";
 import { ReplyForm } from "./ReplyForm";
 import { ReplyList } from "./ReplyList";
@@ -147,7 +147,7 @@ function renderThreadBody(
                                 </div>
                             </div>
                         </div>
-                        <DiscussionModerMenu
+                        <DiscussionModerationMenu
                             itemKind="thread"
                             canPin={isTeacher}
                             canEdit={isAuthor || isTeacher}
