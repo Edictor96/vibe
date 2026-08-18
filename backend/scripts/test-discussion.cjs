@@ -18,7 +18,7 @@ async function listDiscussions(courseId, token) {
   return { status: r.status, body: await r.text() };
 }
 
-const COURSE_ID = '6a8355073523c04699b07fac'; // from seed (latest run)
+const COURSE_ID = '6a83db8d53981cc1c5e85e0f'; // from seed (latest run)
 
 (async () => {
   const t = await login('teacher.discussion@demo.test', 'DemoTeacherPass123!');
