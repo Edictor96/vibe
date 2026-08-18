@@ -3,12 +3,22 @@
  * local Firebase Auth emulator with deterministic accounts for the
  * Discussion Board end-to-end walkthrough.
  *
- * See backend/scripts/seed-discussion-demo.ts (the previous revision)
- * for the full design notes; this is the CommonJS twin kept under
- * a `.cjs` so it runs cleanly through `node` without needing a TS
- * transpile step. Both files share the same Mongo + Firebase schema.
+ * SAFETY: This script is opt-in via `--confirm-demo` (or the
+ * `DEMO_SEED_CONFIRMED` env var). Without it, the script refuses to run.
+ * It also asserts the Mongo target resolves to `127.0.0.1` / `localhost`
+ * — a non-local target (e.g. the Atlas cluster) is rejected so an
+ * accidental `DB_URL` override can't write demo rows to production.
  *
- *   node scripts/seed-discussion-demo.cjs
+ * Usage:
+ *   node scripts/seed-discussion-demo.cjs --confirm-demo
+ *   DEMO_SEED_CONFIRMED=1 node scripts/seed-discussion-demo.cjs
+ *
+ *   # to point at a non-default local stack:
+ *   DB_URL=mongodb://127.0.0.1:27018/vibe?replicaSet=rs0 node \
+ *       scripts/seed-discussion-demo.cjs --confirm-demo
+ *
+ * The script is idempotent: rerunning tears down the previously-seeded
+ * demo course (matched by course name) and recreates it from scratch.
  */
 
 "use strict";
@@ -18,11 +28,53 @@ require("dotenv").config();
 const admin = require("firebase-admin");
 const { MongoClient, ObjectId } = require("mongodb");
 
+// --- Safety gate ----------------------------------------------------
+const argv = process.argv.slice(2);
+const hasConfirmFlag =
+  argv.includes("--confirm-demo") || argv.includes("--yes");
+const hasEnvConfirm = process.env.DEMO_SEED_CONFIRMED === "1";
+if (!hasConfirmFlag && !hasEnvConfirm) {
+  console.error(
+    "\n[seed-discussion-demo] Refusing to run without explicit confirmation.\n" +
+      "Pass --confirm-demo (or set DEMO_SEED_CONFIRMED=1) after you've\n" +
+      "verified DB_URL points at a local emulator DB, not production.\n",
+  );
+  process.exit(2);
+}
+
 const DB_URL = process.env.DB_URL || "mongodb://127.0.0.1:27018/vibe";
 const DB_NAME = process.env.DB_NAME || "vibe";
 const FIREBASE_AUTH_EMULATOR_HOST =
   process.env.FIREBASE_AUTH_EMULATOR_HOST || "127.0.0.1:9099";
 const PROJECT_ID = process.env.GCLOUD_PROJECT || "demo-test";
+
+// Hard guard: only allow localhost / 127.0.0.1 targets. This catches
+// accidental DB_URL overrides that point at the real Atlas cluster.
+// Override with DEMO_SEED_ALLOW_REMOTE=1 only if you really know what
+// you're doing (e.g. a one-off demo against a throwaway cluster).
+if (process.env.DEMO_SEED_ALLOW_REMOTE !== "1") {
+  const u = (() => {
+    try {
+      return new URL(DB_URL);
+    } catch {
+      return null;
+    }
+  })();
+  const host = u ? u.hostname : "";
+  const isLocal =
+    host === "127.0.0.1" ||
+    host === "localhost" ||
+    host === "::1" ||
+    host === "";
+  if (!isLocal) {
+    console.error(
+      `\n[seed-discussion-demo] Refusing to write to non-local target: ${host}\n` +
+        `DB_URL=${DB_URL}\n` +
+        "Set DEMO_SEED_ALLOW_REMOTE=1 to override this guard.\n",
+    );
+    process.exit(3);
+  }
+}
 
 const PERSONAS = [
   {
