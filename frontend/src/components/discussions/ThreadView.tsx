@@ -239,8 +239,8 @@ export function ThreadView({threadId, listHref}: ThreadViewProps) {
     const user = useAuthStore(s => s.user);
     const currentUserUid = user?.uid;
 
-    const {deleteThread} = useDeleteDiscussionThread();
-    const {deleteReply} = useDeleteDiscussionReply();
+    const {mutateAsync: deleteThread} = useDeleteDiscussionThread();
+    const {mutateAsync: deleteReply} = useDeleteDiscussionReply();
     const {pin, unpin} = usePinDiscussionThread();
 
     // Confirm + delete state

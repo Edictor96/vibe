@@ -71,15 +71,7 @@ function decodeErrorPayload(
 
     if (status === 400 && Array.isArray(body.errors)) {
         const fieldErrors: Record<string, string[]> = {};
-        for (const entry of body.errors as Array<{
-            property?: string;
-            constraints?: Record<string, string>;
-            children?: Array<{
-                property?: string;
-                constraints?: Record<string, string>;
-                children?: Array<unknown>;
-            }>;
-        }>) {
+        for (const entry of body.errors as ClassValidatorError[]) {
             collectFieldErrors(entry, "", fieldErrors);
         }
         return {
@@ -120,16 +112,14 @@ function defaultMessageFor(status: number): string {
  * Recursively flatten nested class-validator `children` so a deeply nested
  * field ends up keyed by its full path (e.g. `body` not `children.0.body`).
  */
+ interface ClassValidatorError {
+    property?: string;
+    constraints?: Record<string, string>;
+    children?: ClassValidatorError[];
+}
+
 function collectFieldErrors(
-    entry: {
-        property?: string;
-        constraints?: Record<string, string>;
-        children?: Array<{
-            property?: string;
-            constraints?: Record<string, string>;
-            children?: Array<unknown>;
-        }>;
-    },
+    entry: ClassValidatorError,
     parentPath: string,
     out: Record<string, string[]>,
 ): void {

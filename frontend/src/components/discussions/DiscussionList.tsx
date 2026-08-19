@@ -63,7 +63,7 @@ export function DiscussionList({
         user?.role === "teacher" || user?.role === "admin";
     const currentUserUid = user?.uid;
 
-    const {deleteThread} = useDeleteDiscussionThread();
+    const {mutateAsync: deleteThread} = useDeleteDiscussionThread();
     const {pin, unpin} = usePinDiscussionThread();
 
     const [confirmTarget, setConfirmTarget] = useState<DiscussionThread | null>(
