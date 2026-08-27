@@ -12,6 +12,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useCreateDiscussionThread } from "@/hooks/discussion-hooks";
 import type {
@@ -20,16 +27,36 @@ import type {
     DiscussionThread,
 } from "@/types/discussion.types";
 
+/**
+ * One cohort the teacher may post into, surfaced as a `<Select>` option
+ * when the course version has more than one. The parent resolves this
+ * from the teacher's `INSTRUCTOR` enrollments on the current course.
+ */
+export interface AvailableCohort {
+    id: string;
+    name: string;
+}
+
 interface CreateDiscussionDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     courseId: string;
     /**
-     * Cohort the thread should be created in. The backend re-derives the
-     * caller's authorised scope server-side, so this is treated as a
-     * request, not a grant.
+     * Initial cohort selection — used as the default if the caller didn't
+     * pass `availableCohorts` (or only passed one matching cohort).
+     * The backend re-derives the caller's authorised scope server-side, so
+     * this is treated as a request, not a grant.
      */
     cohortId: string | null;
+    /**
+     * Cohorts the teacher is enrolled in on this course. When length is 0,
+     * the form is disabled and a "no cohort" message is shown. When length
+     * is 1, the single cohort is auto-selected and the picker is hidden.
+     * When length > 1, a `<Select>` is rendered so the teacher explicitly
+     * picks which cohort to post into. Cross-cohort access is blocked by
+     * the backend (Milestone C/D discussionService.assertCohortWritable).
+     */
+    availableCohorts?: AvailableCohort[];
     /**
      * Called with the freshly-created thread so the parent can navigate to
      * its detail page. The hook will already have unwound `isPending`.
@@ -63,6 +90,27 @@ export function CreateDiscussionDialog({
 
     const { mutateAsync, isPending, error: hookError } = useCreateDiscussionThread(courseId);
 
+    // Local cohort state. Initialised from the prop on first open and
+    // any time the availableCohorts list changes (e.g. the parent learns
+    // about a freshly-fetched cohort list). Mirrors the legacy
+    // cohortId-prop path for callers that don't pass availableCohorts.
+    const cohorts = availableCohorts ?? [];
+    const [selectedCohortId, setSelectedCohortId] = useState<string | null>(
+        cohortId ?? cohorts[0]?.id ?? null,
+    );
+    useEffect(() => {
+        if (!open) return;
+        // Pick the first cohort the caller is authorised in. If the caller
+        // passed a legacy `cohortId` that's still in the list, prefer it.
+        if (cohortId && cohorts.some(c => c.id === cohortId)) {
+            setSelectedCohortId(cohortId);
+            return;
+        }
+        setSelectedCohortId(cohorts[0]?.id ?? cohortId ?? null);
+        setFieldErrors({});
+        setFormError(null);
+    }, [open, cohorts, cohortId]);
+
     // Reset local form state every time the dialog re-opens.
     useEffect(() => {
         if (open) {
@@ -94,9 +142,11 @@ export function CreateDiscussionDialog({
         setFormError(null);
         setFieldErrors({});
 
-        if (!cohortId) {
+        if (!selectedCohortId) {
             setFormError(
-                "No cohort is currently selected. Open a course before starting a discussion.",
+                cohorts.length === 0
+                    ? "You are not enrolled in any cohort for this course. Ask an administrator to enrol you before posting."
+                    : "Pick a cohort before starting a discussion.",
             );
             return;
         }
@@ -104,7 +154,7 @@ export function CreateDiscussionDialog({
         const payload: CreateDiscussionBody = {
             title: title.trim(),
             body: body.trim(),
-            cohortId,
+            cohortId: selectedCohortId,
         };
 
         try {
@@ -135,6 +185,48 @@ export function CreateDiscussionDialog({
                 </DialogHeader>
 
                 <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+                    {cohorts.length > 1 && (
+                        <div className="space-y-2">
+                            <Label htmlFor="discussion-cohort">Cohort</Label>
+                            <Select
+                                value={selectedCohortId ?? undefined}
+                                onValueChange={value =>
+                                    setSelectedCohortId(value)
+                                }
+                                disabled={isPending}
+                            >
+                                <SelectTrigger
+                                    id="discussion-cohort"
+                                    data-testid="create-discussion-cohort-trigger"
+                                >
+                                    <SelectValue placeholder="Pick a cohort" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {cohorts.map(c => (
+                                        <SelectItem
+                                            key={c.id}
+                                            value={c.id}
+                                            data-testid={`create-discussion-cohort-option-${c.id}`}
+                                        >
+                                            {c.name}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                            <p className="text-xs text-muted-foreground">
+                                Only members of the chosen cohort will see this thread.
+                            </p>
+                        </div>
+                    )}
+                    {cohorts.length === 0 && (
+                        <p
+                            className="text-xs text-destructive"
+                            data-testid="create-discussion-no-cohort"
+                        >
+                            You are not enrolled in any cohort for this course. Ask an
+                            administrator to enrol you before posting.
+                        </p>
+                    )}
                     <div className="space-y-2">
                         <Label htmlFor="discussion-title">Title</Label>
                         <Input

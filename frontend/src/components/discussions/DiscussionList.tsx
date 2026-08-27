@@ -200,6 +200,7 @@ export function DiscussionList({
                 onOpenChange={setCreateOpen}
                 courseId={courseId}
                 cohortId={cohortId}
+                availableCohorts={cohortsToPostTo}
                 onCreated={thread => {
                     navigate({to: threadHrefBuilder(thread._id) as any});
                 }}

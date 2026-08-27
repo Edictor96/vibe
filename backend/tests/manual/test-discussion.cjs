@@ -99,7 +99,7 @@ async function resolveCourseId() {
     const r = await listDiscussions(courseId, token);
     console.log(`--- ${p.label} (${p.email}) ---`);
     console.log("status:", r.status);
-    console.log("body:", r.body.substring(0, 400));
+    let arr=[]; try { arr = JSON.parse(r.body); } catch (e) { console.log("body (non-JSON):", r.body.substring(0, 400)); continue; } console.log("count:", Array.isArray(arr) ? arr.length : "(not an array)"); if (Array.isArray(arr)) { arr.forEach(t => { const cid = String(t.cohortId || "").slice(-8); console.log("  cohort=" + cid + " pinned=" + t.pinned + " title=" + t.title); }); }
   }
 })().catch(err => {
   console.error("[smoke] failed:", err && err.message ? err.message : err);

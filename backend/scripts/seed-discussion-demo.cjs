@@ -373,40 +373,88 @@ async function main() {
     ]);
     console.log("  ✓ Inserted 4 enrollments (2 students + 2 teacher-in-cohort)");
 
-    // ── 6. Pre-existing thread in cohort A authored by the teacher,
-    //    pinned, with one teacher reply. Student A sees it in step
-    //    10; student B never sees it (cross-cohort isolation). ─────
-    const createdThreadId = new ObjectId();
-    await threadsCol.insertOne({
-      _id: createdThreadId,
-      courseId,
-      cohortId: cohortAId,
-      authorId: teacherId,
-      authorFirebaseUid: TEACHER.firebaseUid,
-      title: "Welcome to the Discussion Board (pre-existing thread)",
-      body:
-        "This thread was seeded by the Milestone E walkthrough so " +
-        "the cohort-isolation cross-checks have something to bite on. " +
-        "Cohort A students should see this; cohort B students should not.",
-      pinned: true,
-      createdAt: now(),
-      updatedAt: now(),
-    });
-
-    await repliesCol.insertOne({
-      _id: new ObjectId(),
-      threadId: createdThreadId,
-      authorId: teacherId,
-      authorFirebaseUid: TEACHER.firebaseUid,
-      body:
-        "First reply in the demo thread — students should be able to reply on top of this without seeing cohort B traffic.",
-      createdAt: now(),
-      updatedAt: now(),
-    });
+    // ── 6. Pre-existing threads. Two threads per cohort, all
+    //    authored by the teacher. Each cohort contains:
+    //      a) one PINNED announcement (so cohort isolation tests
+    //         have pinned + unpinned variants to compare)
+    //      b) one standard discussion thread with a teacher reply
+    //    Cohort A threads are visible only to Student A; Cohort B
+    //    threads only to Student B. The teacher sees both.
+    const seededThreadIds = [];
+    for (const cohortSpec of [
+        {
+            cohortId: cohortAId,
+            cohortName: COHORT_A_NAME,
+            announcements: [
+                {
+                    title: "[Cohort A] Course kickoff and cohort calendar",
+                    body:
+                        "Welcome to Cohort A! This is the pinned announcement thread for our cohort. " +
+                        "Only Cohort A students will see this. Cohort B has its own kickoff post.",
+                    pinned: true,
+                },
+                {
+                    title: "[Cohort A] Office hours this Friday",
+                    body:
+                        "Cohort A: drop your questions here ahead of Friday office hours and I will " +
+                        "triage them at the start of the session.",
+                    pinned: false,
+                },
+            ],
+        },
+        {
+            cohortId: cohortBId,
+            cohortName: COHORT_B_NAME,
+            announcements: [
+                {
+                    title: "[Cohort B] Course kickoff and cohort calendar",
+                    body:
+                        "Welcome to Cohort B! This is the pinned announcement thread for our cohort. " +
+                        "Only Cohort B students will see this. Cohort A has its own kickoff post.",
+                    pinned: true,
+                },
+                {
+                    title: "[Cohort B] Office hours this Friday",
+                    body:
+                        "Cohort B: drop your questions here ahead of Friday office hours and I will " +
+                        "triage them at the start of the session.",
+                    pinned: false,
+                },
+            ],
+        },
+    ]) {
+        for (const ann of cohortSpec.announcements) {
+            const tid = new ObjectId();
+            seededThreadIds.push(tid.toHexString());
+            await threadsCol.insertOne({
+                _id: tid,
+                courseId,
+                cohortId: cohortSpec.cohortId,
+                authorId: teacherId,
+                authorFirebaseUid: TEACHER.firebaseUid,
+                title: ann.title,
+                body: ann.body,
+                pinned: ann.pinned,
+                createdAt: now(),
+                updatedAt: now(),
+            });
+            await repliesCol.insertOne({
+                _id: new ObjectId(),
+                threadId: tid,
+                authorId: teacherId,
+                authorFirebaseUid: TEACHER.firebaseUid,
+                body:
+                    "First reply on this " + cohortSpec.cohortName + " thread — students in this cohort should be able to reply.",
+                createdAt: now(),
+                updatedAt: now(),
+            });
+        }
+    }
 
     console.log(
-      `  ✓ Seeded thread ${createdThreadId.toHexString()} (pinned, 1 reply)`,
+        "  ✓ Seeded " + seededThreadIds.length + " threads (2 per cohort, each with 1 teacher reply)",
     );
+
 
     console.log("\nDone. Demo personas (email / password):");
     for (const p of PERSONAS) {
