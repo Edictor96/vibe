@@ -801,9 +801,13 @@ export class CourseRepository implements ICourseRepository {
       }
       const { _id: _, ...fields } = courseVersion;
 
-      const isExistVersion = await this.courseVersionCollection.findOne({
-        _id: new ObjectId(versionId),
-      });
+      // Must read in the caller's session: a version created earlier in the
+      // same transaction is invisible to a session-less read, so the check
+      // below would spuriously reject it.
+      const isExistVersion = await this.courseVersionCollection.findOne(
+        { _id: new ObjectId(versionId) },
+        { session },
+      );
 
       if (!isExistVersion)
         throw new InternalServerError(
@@ -877,8 +881,8 @@ export class CourseRepository implements ICourseRepository {
       });
 
       if (version?.cohorts?.length > 0) {
-        const cohortDeleteResult = await this.cohortsCollection.updateMany(
-          { courseVersionId: new ObjectId(versionId) },
+        await this.cohortsCollection.updateMany(
+          { courseVersionId: new ObjectId(versionId), isDeleted: { $ne: true } },
           {
             $set: {
               isDeleted: true,
@@ -887,9 +891,8 @@ export class CourseRepository implements ICourseRepository {
           },
           { session }
         );
-        if (cohortDeleteResult.modifiedCount !== version?.cohorts?.length) {
-          throw new InternalServerError('Failed to delete cohorts');
-        }
+        // Don't throw if no cohorts were modified — they may already be
+        // deleted or the references may be orphaned
       }
 
       const versionDeleteResult = await this.courseVersionCollection.updateOne(

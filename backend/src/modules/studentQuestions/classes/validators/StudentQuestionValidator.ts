@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsIn,
   IsInt,
   IsMongoId,
   IsNotEmpty,
@@ -19,8 +20,10 @@ const QUESTION_TYPES = ['SELECT_ONE_IN_LOT'] as const;
 type QuestionTypeLiteral = (typeof QUESTION_TYPES)[number];
 const STATUS_VALUES = ['PENDING', 'HELD', 'APPROVED', 'REJECTED'] as const;
 type StatusLiteral = (typeof STATUS_VALUES)[number];
-const STATUS_FILTER_VALUES = ['PENDING', 'APPROVED', 'REJECTED', 'ALL'] as const;
+const STATUS_FILTER_VALUES = ['PENDING', 'HELD', 'APPROVED', 'REJECTED', 'ALL'] as const;
 type StatusFilterLiteral = (typeof STATUS_FILTER_VALUES)[number];
+const GATE_STATE_FILTER_VALUES = ['COLLECTING', 'ELIGIBLE'] as const;
+type GateStateFilterLiteral = (typeof GATE_STATE_FILTER_VALUES)[number];
 
 export class StudentQuestionOptionDto {
   @IsString()
@@ -195,6 +198,32 @@ export class StudentQuestionListItemResponse {
   @IsOptional()
   @IsString()
   rejectionReason?: string;
+
+  /** Why an automated screen HELD this question — only set when status === HELD. */
+  @IsOptional()
+  @IsString()
+  screeningMessage?: string;
+
+  /** Peer-validation lifecycle state; only meaningful while status === PENDING. */
+  @IsOptional()
+  @IsString()
+  gateState?: string;
+
+  @IsOptional()
+  @IsInt()
+  responseCount?: number;
+
+  @IsOptional()
+  @IsInt()
+  correctCount?: number;
+
+  @IsOptional()
+  @IsInt()
+  thumbsUpCount?: number;
+
+  @IsOptional()
+  @IsInt()
+  thumbsDownCount?: number;
 }
 
 export class StudentQuestionListResponse {
@@ -213,13 +242,31 @@ export class CourseVersionStudentQuestionPathParams {
 }
 
 export class CourseVersionStudentQuestionListQuery {
+  // NOTE: typed as `string` (not the StatusFilterLiteral alias) deliberately —
+  // routing-controllers' @QueryParams() normalization reads the TS-emitted
+  // `design:type` metadata per property, and a `typeof array[number]` union
+  // alias serializes to `Object`, which routes the raw query string through
+  // JSON.parse() and throws on any non-JSON value (e.g. "PENDING"). Plain
+  // `string` emits `String` and normalizes correctly. @IsIn enforces the
+  // actual allowed values at runtime since the TS union narrowing is lost.
   @IsOptional()
   @IsString()
+  @IsIn(STATUS_FILTER_VALUES)
   @JSONSchema({
     enum: [...STATUS_FILTER_VALUES],
     description: 'Status filter. Defaults to ALL.',
   })
-  status?: StatusFilterLiteral;
+  status?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(GATE_STATE_FILTER_VALUES)
+  @JSONSchema({
+    enum: [...GATE_STATE_FILTER_VALUES],
+    description:
+      'Peer-validation gate state filter (only meaningful for PENDING questions). Omit to see both COLLECTING and ELIGIBLE.',
+  })
+  gateState?: string;
 
   @IsOptional()
   @IsInt()
@@ -230,13 +277,15 @@ export class CourseVersionStudentQuestionListQuery {
 }
 
 export class MyStudentQuestionsListQuery {
+  // See CourseVersionStudentQuestionListQuery.status for why this is `string`.
   @IsOptional()
   @IsString()
+  @IsIn(STATUS_FILTER_VALUES)
   @JSONSchema({
     enum: [...STATUS_FILTER_VALUES],
     description: 'Status filter for the current user\'s submissions. Defaults to ALL.',
   })
-  status?: StatusFilterLiteral;
+  status?: string;
 
   @IsOptional()
   @IsInt()

@@ -194,9 +194,13 @@ export class CourseVersionService extends BaseService {
         throw new InternalServerError('Failed to read course version.');
       }
       if (readVersion.cohorts?.length) {
+        // getCohortsByIds defaults to limit: 10 for its paginated cohort-browser
+        // callers -- passing that default here silently dropped every cohort
+        // beyond the 10 most recently created from cohortDetails, which every
+        // cohort picker in the UI is populated from.
         const cohorts = await this.courseRepo.getCohortsByIds(
           readVersion.cohorts,
-          undefined,
+          {limit: readVersion.cohorts.length},
           session,
         );
 
@@ -383,7 +387,8 @@ export class CourseVersionService extends BaseService {
   public async deleteCohortInCourseVersion(
     versionId: string,
     cohortId: string,
-  ): Promise<boolean> {
+    confirmCancelInvites: boolean = false,
+  ): Promise<{deleted: boolean; pendingInviteCount: number}> {
     return this._withTransaction(async session => {
       const existingCohort = await this.courseRepo.getCohortsByIds(
         Array.of(new ObjectId(cohortId)),
@@ -403,12 +408,34 @@ export class CourseVersionService extends BaseService {
           "Students are already enrolled in this cohort, can't delete",
         );
       }
+
+      // Pending/unaccepted invites still target this cohort's id. Left alone,
+      // accepting one later would enroll the invitee against a cohort that no
+      // longer exists. Require explicit confirmation before wiping them out,
+      // since cancellation can't be undone.
+      const pendingInviteCount =
+        await this.inviteService.countPendingInvitesForCohort(
+          cohortId,
+          session,
+        );
+      if (pendingInviteCount > 0 && !confirmCancelInvites) {
+        return {deleted: false, pendingInviteCount};
+      }
+      if (pendingInviteCount > 0) {
+        await this.inviteService.cancelPendingInvites({cohortId}, session);
+      }
+
+      // Detach lingering references (inactive/soft-deleted/ejected enrollments,
+      // and cohort-scoped progress/watch-time/etc.) before the cohort id is
+      // gone for good, so nothing points at a dead cohort afterward.
+      await this.enrollmentService.clearCohortReferences(cohortId, session);
       await this.courseRepo.deleteCohortById(cohortId, session);
-      return await this.courseRepo.removeCohortFromVersion(
+      await this.courseRepo.removeCohortFromVersion(
         versionId,
         cohortId,
         session,
       );
+      return {deleted: true, pendingInviteCount};
     });
   }
 
@@ -877,9 +904,10 @@ export class CourseVersionService extends BaseService {
         throw new InternalServerError('Failed to read course version.');
       }
       if (readVersion.cohorts?.length) {
+        // See readCourseVersion's cohortDetails hydration above -- same default-limit trap.
         const cohorts = await this.courseRepo.getCohortsByIds(
           readVersion.cohorts,
-          undefined,
+          {limit: readVersion.cohorts.length},
           session,
         );
 

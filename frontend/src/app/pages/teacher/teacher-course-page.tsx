@@ -31,6 +31,7 @@ import {
   X, FolderKanban,
   Menu,
   MessageSquare,
+  NotebookPen,
   Eye,
   EyeOff,
   Loader2,
@@ -59,6 +60,7 @@ import { Label } from "@/components/ui/label";
 import ProjectItem from "./components/ProjectItem";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, SidebarResizablePanel } from "@/components/ui/resizable";
 import FeedbackFormEditor from "./FeedbackFormEditor";
+import ReflectionItemEditor from './components/ReflectionItemEditor';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/utils/utils";
@@ -97,14 +99,24 @@ const getItemIcon = (type: string) => {
     case "VIDEO": return <VideoIcon className="h-3 w-3" />;
     case "QUIZ": return <ListChecks className="h-3 w-3" />;
     case "PROJECT": return <FolderKanban className="h-3 w-3" />;
-    case "FEEDBACK": return <MessageSquare className="h-3 w-3" />
+    case "FEEDBACK": return <MessageSquare className="h-3 w-3" />;
+    case "REFLECTION": return <NotebookPen className="h-3 w-3" />;
     default: return null;
   }
 };
 
+// Items (video/quiz/blog) don't carry their own createdAt field, but their
+// Mongo ObjectId does: the first 4 bytes are a big-endian Unix timestamp set
+// at generation time, and item _ids are generated once, at creation.
+function getCreatedAtFromObjectId(id?: string | null): Date | null {
+  if (!id || id.length < 8) return null;
+  const seconds = parseInt(id.substring(0, 8), 16);
+  return Number.isNaN(seconds) ? null : new Date(seconds * 1000);
+}
+
 interface LabelOptions {
   itemId: string;
-  itemType: "VIDEO" | "QUIZ" | "BLOG" | "PROJECT" | "FEEDBACK";
+  itemType: "VIDEO" | "QUIZ" | "BLOG" | "PROJECT" | "FEEDBACK" | "REFLECTION";
   sectionItems: Record<string, any[]>;
   sectionId: string;
 }
@@ -1066,13 +1078,14 @@ function TeacherCourseContent() {
   const handleAddItem = (moduleId: string, sectionId: string, type: string, videoData?: any) => {
     if (!versionId) return;
 
-    type ItemType = "VIDEO" | "QUIZ" | "BLOG" | "PROJECT" | "FEEDBACK";
+    type ItemType = "VIDEO" | "QUIZ" | "BLOG" | "PROJECT" | "FEEDBACK" | "REFLECTION";
     const typeMap: Record<string, ItemType> = {
       video: "VIDEO",
       quiz: "QUIZ",
       article: "BLOG",
       project: "PROJECT",
-      feedback: "FEEDBACK"
+      feedback: "FEEDBACK",
+      reflection: "REFLECTION"
     };
 
     // Handle video items
@@ -1084,7 +1097,16 @@ function TeacherCourseContent() {
           name: videoData.name,
           description: videoData.description,
           videoDetails: {
-            URL: videoData.details.URL,
+            // URL and source/assetId are mutually exclusive — send only the pair
+            // the modal actually produced. Listing URL unconditionally would send
+            // it as undefined for an upload, and the backend would then validate
+            // the item as a YouTube video and reject it for a missing URL.
+            ...(videoData.details.source === "GCS"
+              ? {
+                source: videoData.details.source,
+                assetId: videoData.details.assetId,
+              }
+              : { URL: videoData.details.URL }),
             startTime: videoData.details.startTime,
             endTime: videoData.details.endTime,
             points: videoData.details.points,
@@ -2265,6 +2287,34 @@ function TeacherCourseContent() {
                                                           console.error(err);
                                                         });
                                                     }
+                                                    else if (type === "reflection") {
+                                                      createItemAsync({
+                                                        params: {
+                                                          path: {
+                                                            versionId: versionId!,
+                                                            moduleId: module.moduleId,
+                                                            sectionId: section.sectionId,
+                                                          },
+                                                        },
+                                                        body: {
+                                                          type: "REFLECTION",
+                                                          name: "Reflection",
+                                                          description: "Write what you learned, then review your peers anonymously",
+                                                          reflectionDetails: {},
+                                                        } as any,
+                                                      })
+                                                        .then(() => {
+                                                          refetchVersion();
+                                                          if (shouldFetchItems) {
+                                                            refetchItems();
+                                                          }
+                                                          toast.success("Reflection added");
+                                                        })
+                                                        .catch((err) => {
+                                                          toast.error("Failed to add reflection");
+                                                          console.error(err);
+                                                        });
+                                                    }
                                                     else if (type === "csv_upload") {
                                                       setActiveSectionInfo({ moduleId: module.moduleId, sectionId: section.sectionId });
                                                       setShowCSVUpload(true);
@@ -2292,6 +2342,8 @@ function TeacherCourseContent() {
                                                 <option value="quiz">Quiz</option>
 
                                                 <option value="feedback">Feedback Form</option>
+
+                                                <option value="reflection">Reflection (peer reviewed)</option>
 
                                                 <option
                                                   value="project"
@@ -2886,6 +2938,18 @@ function TeacherCourseContent() {
                         </div>
                       )}
 
+                      {selectedEntity.type === "item" && (
+                        <div className="flex gap-6 text-xs text-muted-foreground">
+                          <div>
+                            <span className="font-semibold">Created:</span>{" "}
+                            {(() => {
+                              const createdAt = getCreatedAtFromObjectId(selectedItemData?.item?._id);
+                              return createdAt ? createdAt.toLocaleString() : "N/A";
+                            })()}
+                          </div>
+                        </div>
+                      )}
+
                       {(selectedEntity.type !== "item") && (
                         <>
                           <div className="space-y-2">
@@ -3166,6 +3230,8 @@ function TeacherCourseContent() {
                             selectedItemName={selectedItem.name}
                             action={isEditingItem ? "edit" : "view"}
                             item={selectedItemData?.item}
+                            courseId={courseId}
+                            courseVersionId={versionId}
                             onClose={() => setIsEditingItem(false)}
                             onSave={video => {
                               const formattedVideo = {
@@ -3249,6 +3315,8 @@ function TeacherCourseContent() {
                               selectedItemName={selectedItem.name}
                               action={isEditingItem ? "edit" : "view"}
                               item={selectedItemData?.item}
+                              courseId={courseId}
+                              courseVersionId={versionId}
                               onClose={() => setIsEditingItem(false)}
                               onSave={video => {
                                 const formattedVideo = {
@@ -3441,6 +3509,22 @@ function TeacherCourseContent() {
 )} */}
 
 
+                      {selectedEntity.type === "item" && selectedEntity.data.type === "REFLECTION" && (
+                        <ReflectionItemEditor
+                          itemId={selectedEntity.data._id}
+                          courseId={courseId!}
+                          versionId={versionId!}
+                          name={selectedEntity.data.name}
+                          description={selectedEntity.data.description}
+                          details={(selectedItemData as any)?.details}
+                          onSaved={() => {
+                            refetchVersion();
+                            refetchItems();
+                            refetchItem();
+                          }}
+                        />
+                      )}
+
                       {selectedEntity.type === "item" && selectedEntity.data.type === "FEEDBACK" && (
                         <FeedbackFormEditor
                           isLoading={isLoading}
@@ -3601,6 +3685,8 @@ function TeacherCourseContent() {
             isLoading={isLoading}
             selectedItemName={selectedItem.name}
             action="add"
+            courseId={courseId}
+            courseVersionId={versionId}
             onClose={() => setShowAddVideoModal(null)}
             onSave={video => {
               handleAddItem(

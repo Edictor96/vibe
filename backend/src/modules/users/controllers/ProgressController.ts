@@ -11,6 +11,7 @@ import {
   UpdateProgressBody,
   ResetCourseProgressParams,
   ResetCourseProgressBody,
+  AdminAdvanceProgressBody,
   ProgressDataResponse,
   ProgressNotFoundErrorResponse,
   WatchTimeParams,
@@ -616,6 +617,96 @@ It returns an empty body with a 200 status code.
   }
 
   @OpenAPI({
+    summary: 'Admin: advance a stuck student past their current item',
+    description: `Manually advances a student's currentItem to the next item in
+sequence, without recording a genuine completion for the item they're stuck on.<br/>
+Admin only — not exposed to course instructors or the student, since this bypasses
+linear progression on request.<br/>
+Moves exactly one item per call; call again to advance further. A reason is
+required and every call is audited.<br/>
+It returns an empty body with a 200 status code.
+`,
+  })
+  @Authorized(['admin'])
+  @Post('/:userId/progress/courses/:courseId/versions/:versionId/admin-advance')
+  @UseInterceptor(AuditTrailsHandler)
+  @OnUndefined(200)
+  @ResponseSchema(UserNotFoundErrorResponse, {
+    description: 'Progress not found',
+    statusCode: 404,
+  })
+  @ResponseSchema(InternalServerErrorResponse, {
+    description: 'Progress could not be advanced',
+    statusCode: 500,
+  })
+  async adminAdvanceStuckProgress(
+    @Params() params: ResetCourseProgressParams,
+    @Body() body: AdminAdvanceProgressBody,
+    @CurrentUser({ required: true }) user: IUser,
+    @Req() req: Request,
+  ): Promise<void> {
+    const { userId, courseId, versionId } = params;
+    const { reason, cohortId } = body;
+
+    const before = await this.progressService.getUserProgressPercentage(
+      userId,
+      courseId,
+      versionId,
+      cohortId,
+    );
+
+    await this.progressService.adminAdvanceStuckStudent(
+      userId,
+      courseId,
+      versionId,
+      reason,
+      user._id.toString(),
+      cohortId,
+    );
+
+    const after = await this.progressService.getUserProgressPercentage(
+      userId,
+      courseId,
+      versionId,
+      cohortId,
+    );
+
+    setAuditTrail(req, {
+      category: AuditCategory.PROGRESS,
+      action: AuditAction.PROGRESS_ADMIN_ADVANCE,
+      actor: {
+        id: ObjectId.createFromHexString(user._id.toString()),
+        name: `${user.firstName} ${user.lastName}`,
+        email: user.email,
+        role: user.roles,
+      },
+      context: {
+        courseId: ObjectId.createFromHexString(courseId),
+        courseVersionId: ObjectId.createFromHexString(versionId),
+        userId: ObjectId.createFromHexString(userId),
+      },
+      changes: {
+        before: {
+          completed: before?.completed ?? false,
+          completedItems: before?.completedItems ?? 0,
+          compltedPercentage: before?.percentCompleted ?? 0,
+          totalItems: before?.totalItems ?? 0,
+          reason,
+        },
+        after: {
+          completed: after.completed,
+          completedItems: after.completedItems,
+          compltedPercentage: after.percentCompleted,
+          totalItems: after.totalItems,
+        },
+      },
+      outcome: {
+        status: OutComeStatus.SUCCESS,
+      },
+    });
+  }
+
+  @OpenAPI({
     summary: 'Get User Watch Time',
     description: `Gets the User Watch Time for the given Item Id`,
   })
@@ -1007,12 +1098,11 @@ It returns an empty body with a 200 status code.
   }
 
   /////////////////////////////// TEMP ENDPOINT WITHOUT AUTH //////////////////////////////////
-  @Authorized()
   @Get('/progress/courses/:courseId/versions/:versionId/leaderboard/no-auth')
   @OpenAPI({
     summary: 'Get course leaderboard without authorization',
     description:
-      'Returns ranked list of students based on completion percentage and time',
+      'Returns ranked list of students based on completion percentage and time. This is a public endpoint that does not require authentication.',
   })
   @ResponseSchema(GetLeaderboardResponse, {
     description: 'Leaderboard retrieved successfully',
@@ -1024,14 +1114,8 @@ It returns an empty body with a 200 status code.
   })
   async getNoAuthLeaderboard(
     @Params() params: GetUserProgressParams,
-    @Ability(getProgressAbility) { ability },
   ): Promise<GetLeaderboardResponse> {
     const { courseId, versionId } = params;
-
-    const progressResource = subject('Progress', { courseId, versionId });
-    if (!ability.can(ProgressActions.View, progressResource)) {
-      throw new ForbiddenError('You do not have permission to view this leaderboard');
-    }
 
     return await this.progressService.getLeaderboardNoAuth(
       courseId,
