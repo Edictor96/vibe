@@ -38,18 +38,28 @@ export interface IDirectUploadSummary {
 
 const BASE_URL = import.meta.env.VITE_BASE_URL;
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+/** An error from the direct routes, keeping the HTTP status (503 = not set up on the server). */
+export class DirectApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+async function request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
   const token = localStorage.getItem("firebase-auth-token");
   if (!token) throw new Error("You are signed out. Please sign in again.");
 
   let response: Response;
   try {
     response = await fetch(`${BASE_URL}/smart-bloom/direct${path}`, {
-      method: "POST",
+      method,
       mode: "cors",
       credentials: "include",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
     throw new Error("Could not reach the ViBe server. Check your connection and try again.");
@@ -63,14 +73,18 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     data = null;
   }
   if (!response.ok) {
-    const body = (data ?? {}) as { message?: unknown; error?: unknown };
-    const message = body.message || body.error || text || response.statusText;
-    throw new Error(String(message));
+    const errorBody = (data ?? {}) as { message?: unknown; error?: unknown };
+    const message = errorBody.message || errorBody.error || text || response.statusText;
+    throw new DirectApiError(String(message), response.status);
   }
   return data as T;
 }
 
+const post = <T>(path: string, body: unknown) => request<T>("POST", path, body);
+
 export const smartBloomDirectAPI = {
+  status: () => request<{ minimaxConfigured: boolean }>("GET", "/status"),
+
   transcriptFromYouTube: (versionId: string, videoUrl: string) =>
     post<IDirectTranscriptResult>("/transcript/youtube", { versionId, videoUrl }),
 

@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { aiSectionAPI, connectToLiveStatusUpdates, getApiUrl } from "@/lib/genai-api";
-import { smartBloomDirectAPI, textInWindow, type TranscriptChunk } from "@/lib/smart-bloom-direct-api";
+import { DirectApiError, smartBloomDirectAPI, textInWindow, type TranscriptChunk } from "@/lib/smart-bloom-direct-api";
 import { readTranscriptFile } from "@/lib/transcript-file-reader";
 import { useCourseStore } from "@/store/course-store";
 import { toast } from "sonner";
@@ -571,6 +571,8 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
   const directSegmentMapRef = useRef<number[]>([]);
   const directQuestionSeqRef = useRef(0);
   const [transcriptPrompt, setTranscriptPrompt] = useState<string | null>(null);
+  // Why the last run stopped; stays on screen (with the log) until the next run starts.
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [isReadingTranscriptFile, setIsReadingTranscriptFile] = useState(false);
   const [pastedTranscript, setPastedTranscript] = useState("");
   const transcriptFileResolverRef = useRef<((input: TranscriptInput | null) => void) | null>(null);
@@ -1456,6 +1458,16 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
     setSegmentCount(null);
     setRevealedSegmentCount(0);
     addLog(`AI server unavailable (${reason}). Continuing without it: YouTube captions + MiniMax.`);
+
+    // Check the server can generate questions before asking the instructor for anything.
+    const { minimaxConfigured } = await smartBloomDirectAPI.status();
+    if (!minimaxConfigured) {
+      throw new Error(
+        "The AI server is unavailable, and the backup (direct mode) is not set up on this server: " +
+          "MINIMAX_API_KEY is missing from the backend environment. Ask the platform admin to add it, " +
+          "or try again when the AI server is back.",
+      );
+    }
     toast.info("AI server unavailable — continuing in direct mode.");
 
     // ── Transcript ──
@@ -1487,6 +1499,7 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
     addLog(`Generating about ${plan.totalQuestions} questions for ${segMap.length} segment(s)…`);
 
     let generatedTotal = 0;
+    let curationOpened = false;
     for (let i = 0; i < segMap.length; i++) {
       addLog(`Generating questions for segment ${i + 1}…`);
       let generated: CuratedQuestion[] = [];
@@ -1498,21 +1511,24 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
           instructions,
         );
       } catch (error) {
+        // A setup problem affects every segment: stop instead of repeating it.
+        if (error instanceof DirectApiError && error.status === 503) throw error;
         const msg = error instanceof Error ? error.message : "Unknown error";
-        addLog(`Segment ${i + 1}: ${msg} You can refill this segment during curation.`);
+        addLog(`Segment ${i + 1} failed: ${msg}`);
       }
       generatedTotal += generated.length;
       if (generated.length) mergeQuestions(generated);
       setRevealedSegmentCount(i + 1);
-      addLog(`Segment ${i + 1} ready — ${generated.length} questions available`);
-      if (i === 0) {
+      addLog(`Segment ${i + 1}: ${generated.length} questions available`);
+      if (!curationOpened && generated.length) {
+        curationOpened = true;
         setPipelineStep("CURATION_READY");
-        toast.success("Segment 1 ready — start swiping! More segments loading…");
+        toast.success(`Segment ${i + 1} ready — start swiping! More segments loading…`);
       }
     }
 
     if (generatedTotal === 0) {
-      throw new Error("No questions could be generated. Please try again later.");
+      throw new Error("No questions could be generated for any segment. See the log above for the reason.");
     }
     if (segMap.length > 1) {
       toast.success(`All ${segMap.length} segments ready for curation.`);
@@ -1905,6 +1921,7 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
     setAcceptedQuestionIds(new Set());
     setRejectedQuestionIds(new Set());
     setPipelineMode("AI_SERVER");
+    setPipelineError(null);
     aiCurationStartedRef.current = false;
     directTranscriptRef.current = [];
     directSegmentMapRef.current = [];
@@ -1953,16 +1970,17 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
           console.error("Smart Bloom direct mode failed:", directError);
           const directMsg = directError instanceof Error ? directError.message : "Unknown error";
           addLog(`Error: ${directMsg}`);
-          toast.error(`Smart Bloom failed: ${directMsg}`);
+          toast.error("Smart Bloom could not continue — see the details below.");
+          setPipelineError(directMsg);
           setTranscriptPrompt(null);
-          setPipelineMode("AI_SERVER");
           setPipelineStep("IDLE");
           return;
         }
       }
 
       addLog(`Error: ${msg}`);
-      toast.error(`Smart Bloom failed: ${msg}`);
+      toast.error("Smart Bloom could not continue — see the details below.");
+      setPipelineError(msg);
       setPipelineStep("IDLE");
     } finally {
       setIsSubmitting(false);
@@ -2163,7 +2181,7 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
           </div>
 
           {/* ── Pipeline Progress Panel ── */}
-          {pipelineStep !== "IDLE" && (
+          {(pipelineStep !== "IDLE" || pipelineError) && (
             <div className="rounded-lg border bg-muted/30 p-4 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold">Pipeline Progress</h3>
@@ -2324,6 +2342,19 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="h-3 w-3 animate-spin" />
                   Reading transcript file…
+                </div>
+              )}
+
+              {/* Why the run stopped; stays until the next run */}
+              {pipelineError && pipelineStep === "IDLE" && (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 dark:border-red-900 dark:bg-red-950/30">
+                  <div className="flex items-start gap-2 text-sm text-red-800 dark:text-red-300">
+                    <XCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="font-medium">Smart Bloom stopped</p>
+                      <p className="mt-0.5 text-xs">{pipelineError}</p>
+                    </div>
+                  </div>
                 </div>
               )}
 

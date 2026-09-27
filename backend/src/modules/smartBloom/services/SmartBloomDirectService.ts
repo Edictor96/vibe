@@ -1,5 +1,5 @@
 import {injectable, inject} from 'inversify';
-import {BadRequestError} from 'routing-controllers';
+import {BadRequestError, HttpError} from 'routing-controllers';
 import {ObjectId} from 'mongodb';
 import {ItemType} from '#root/shared/index.js';
 import {COURSES_TYPES} from '#root/modules/courses/types.js';
@@ -111,6 +111,19 @@ export class SmartBloomDirectService {
     return {minimaxConfigured: this.minimax.isConfigured()};
   }
 
+  /**
+   * Segmentation and questions need MiniMax. Without a key, say so plainly (503:
+   * a server setup problem, not a bad request) instead of failing quietly.
+   */
+  private assertMinimaxConfigured() {
+    if (!this.minimax.isConfigured()) {
+      throw new HttpError(
+        503,
+        'Smart Bloom direct mode is not set up on this server: MINIMAX_API_KEY is missing from the backend environment.',
+      );
+    }
+  }
+
   // ── Step 1: transcript ────────────────────────────────────────────────────
 
   async transcriptFromYouTube(videoUrl: string): Promise<ITranscriptResult> {
@@ -166,6 +179,7 @@ export class SmartBloomDirectService {
     warning?: string;
   }> {
     if (!chunks.length) throw new BadRequestError('The transcript is empty.');
+    this.assertMinimaxConfigured();
     const end = Math.max(
       transcriptEndTime(chunks),
       Number(videoEndSeconds) || 0,
@@ -229,6 +243,7 @@ export class SmartBloomDirectService {
     );
     if (!levels.length)
       throw new BadRequestError('No Bloom levels were requested.');
+    this.assertMinimaxConfigured();
 
     const system =
       'You write assessment questions for an online course from a lecture transcript. ' +
@@ -272,10 +287,13 @@ export class SmartBloomDirectService {
 
     const questions: any[] = [];
     const failedLevels: string[] = [];
+    let firstFailure = '';
     let dropped = 0;
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         failedLevels.push(levels[index]);
+        firstFailure ||=
+          (result.reason as Error)?.message ?? String(result.reason);
         return;
       }
       const reply: any = result.value;
@@ -295,8 +313,10 @@ export class SmartBloomDirectService {
     });
 
     if (!questions.length && failedLevels.length === levels.length) {
-      throw new BadRequestError(
-        'MiniMax could not generate questions for this segment. Please try again.',
+      // An upstream failure, not the caller's fault: 502 with the real cause.
+      throw new HttpError(
+        502,
+        `MiniMax could not generate questions for this segment (${firstFailure}). Please try again.`,
       );
     }
     return {questions, failedLevels, dropped};

@@ -14,7 +14,14 @@ export const smartBloomConfig = {
     apiKey: env('MINIMAX_API_KEY'),
     model:
       env('SMART_BLOOM_MINIMAX_MODEL') || env('MINIMAX_MODEL') || 'MiniMax-M3',
-    url: env('MINIMAX_URL') || 'https://api.minimax.io/v1/chat/completions',
+    // MINIMAX_URL is the full endpoint (screening's variable); MINIMAX_API_URL is the
+    // base URL the support assistant uses. Honour either, so a key issued for a
+    // regional MiniMax host is always sent to that host.
+    url:
+      env('MINIMAX_URL') ||
+      (env('MINIMAX_API_URL')
+        ? `${env('MINIMAX_API_URL')!.replace(/\/+$/, '')}/chat/completions`
+        : 'https://api.minimax.io/v1/chat/completions'),
   },
 
   /**
