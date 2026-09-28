@@ -19,11 +19,10 @@ import {smartBloomConfig} from '#root/config/smartBloom.js';
 import {SMART_BLOOM_TYPES} from '../types.js';
 import {SmartBloomDirectService} from '../services/SmartBloomDirectService.js';
 import {
-  FileTranscriptBody,
+  TranscriptBody,
   QuestionsBody,
   SegmentBody,
   UploadBody,
-  YouTubeTranscriptBody,
 } from '../classes/validators/SmartBloomValidators.js';
 import {BloomDistribution} from '../utils/Questions.js';
 
@@ -34,7 +33,7 @@ const LARGE_BODY = {
 
 /**
  * Smart Bloom's direct path: runs when the AI server is unavailable, using
- * YouTube captions or an uploaded transcript plus MiniMax. Every route requires
+ * a transcript the instructor pastes or uploads, plus MiniMax. Every route requires
  * permission to create items in the course version, the same rule as adding an
  * item by hand, because the end result is new course items.
  */
@@ -67,28 +66,19 @@ export class SmartBloomDirectController {
     return this.service.status();
   }
 
-  @OpenAPI({summary: "Build the transcript from the video's YouTube captions"})
-  @Post('/transcript/youtube')
+  @OpenAPI({
+    summary:
+      'Read a transcript the instructor pasted or uploaded, in any layout with timestamps',
+  })
+  @Post('/transcript')
   @Authorized()
   @HttpCode(200)
-  async transcriptFromYouTube(
-    @Body() body: YouTubeTranscriptBody,
+  async transcript(
+    @Body(LARGE_BODY) body: TranscriptBody,
     @Ability(getItemAbility) {ability},
   ) {
     this.assertCanCreate(ability, body.versionId);
-    return this.service.transcriptFromYouTube(body.videoUrl);
-  }
-
-  @OpenAPI({summary: 'Build the transcript from an uploaded .srt or .vtt file'})
-  @Post('/transcript/file')
-  @Authorized()
-  @HttpCode(200)
-  async transcriptFromFile(
-    @Body(LARGE_BODY) body: FileTranscriptBody,
-    @Ability(getItemAbility) {ability},
-  ) {
-    this.assertCanCreate(ability, body.versionId);
-    return this.service.transcriptFromFile(body.fileName, body.content);
+    return this.service.parseTranscript(body.content);
   }
 
   @OpenAPI({summary: 'Split the transcript into segments'})
@@ -112,12 +102,7 @@ export class SmartBloomDirectController {
         ] as [number, number],
         text: chunk.text,
       }));
-    return this.service.segment(
-      chunks,
-      body.strategy,
-      body.minSegmentSeconds,
-      body.videoEndSeconds,
-    );
+    return this.service.segment(chunks, body.strategy, body.minSegmentSeconds);
   }
 
   @OpenAPI({summary: 'Generate questions for one segment'})

@@ -15,42 +15,6 @@ export interface ITranscript {
   chunks: ITranscriptChunk[];
 }
 
-const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
-
-/** Pull the 11-character video id out of any common YouTube URL form. */
-export function extractYouTubeVideoId(url: string): string | null {
-  const raw = String(url ?? '').trim();
-  if (YOUTUBE_ID.test(raw)) return raw;
-
-  let parsed: URL;
-  try {
-    parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-  } catch {
-    return null;
-  }
-
-  const host = parsed.hostname.replace(/^(www\.|m\.|music\.)/, '');
-  let id: string | null = null;
-  if (host === 'youtu.be') {
-    id = parsed.pathname.split('/')[1] ?? null;
-  } else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
-    if (parsed.pathname === '/watch') {
-      id = parsed.searchParams.get('v');
-    } else {
-      const [, kind, value] = parsed.pathname.split('/');
-      if (
-        kind === 'embed' ||
-        kind === 'shorts' ||
-        kind === 'live' ||
-        kind === 'v'
-      ) {
-        id = value ?? null;
-      }
-    }
-  }
-  return id && YOUTUBE_ID.test(id) ? id : null;
-}
-
 /** "HH:MM:SS,mmm", "MM:SS.mmm" or "SS.mmm" to seconds; null when unreadable. */
 export function parseCueTime(value: string): number | null {
   const parts = value.trim().replace(',', '.').split(':');

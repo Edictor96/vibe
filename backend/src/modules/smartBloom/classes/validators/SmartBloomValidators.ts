@@ -23,27 +23,10 @@ class VersionScoped {
   versionId: string;
 }
 
-export class YouTubeTranscriptBody extends VersionScoped {
-  @JSONSchema({description: 'Public YouTube URL of the lecture video'})
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(500)
-  videoUrl: string;
-}
-
-export class FileTranscriptBody extends VersionScoped {
+export class TranscriptBody extends VersionScoped {
   @JSONSchema({
     description:
-      'Original file name, or "pasted.txt" for pasted text (informational)',
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(255)
-  fileName: string;
-
-  @JSONSchema({
-    description:
-      'Transcript text in any layout with timestamps (the page extracts text from .docx/.xlsx first)',
+      'Transcript text in any layout with timestamps: pasted from YouTube\'s "Show transcript" panel or read from a file (the page extracts text from .docx/.xlsx first)',
   })
   @IsString()
   @IsNotEmpty()
@@ -68,15 +51,6 @@ export class SegmentBody extends VersionScoped {
   @Min(30)
   @Max(1800)
   minSegmentSeconds: number;
-
-  @JSONSchema({
-    description:
-      'Video length in seconds, when known, so the last segment reaches the end',
-  })
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  videoEndSeconds?: number;
 }
 
 export class QuestionsBody extends VersionScoped {
@@ -164,8 +138,7 @@ export class UploadBody extends VersionScoped {
 }
 
 export const SMART_BLOOM_VALIDATORS = [
-  YouTubeTranscriptBody,
-  FileTranscriptBody,
+  TranscriptBody,
   SegmentBody,
   QuestionsBody,
   UploadBody,

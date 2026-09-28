@@ -1,6 +1,5 @@
 const TYPES = {
   SmartBloomDirectService: Symbol.for('SmartBloomDirectService'),
-  YouTubeCaptionService: Symbol.for('SmartBloomYouTubeCaptionService'),
   MinimaxClient: Symbol.for('SmartBloomMinimaxClient'),
 };
 

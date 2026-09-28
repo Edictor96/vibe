@@ -1,7 +1,6 @@
 import {describe, it, expect} from 'vitest';
 import {
   evenSegmentMap,
-  extractYouTubeVideoId,
   json3ToChunks,
   normalizeSegmentMap,
   parseCueTime,
@@ -9,30 +8,6 @@ import {
   textInWindow,
   transcriptEndTime,
 } from '../utils/Transcript.js';
-
-describe('extractYouTubeVideoId', () => {
-  const ID = 'dQw4w9WgXcQ';
-  it.each([
-    `https://www.youtube.com/watch?v=${ID}`,
-    `https://youtube.com/watch?v=${ID}&t=42s&list=PL123`,
-    `https://youtu.be/${ID}?si=abc`,
-    `https://www.youtube.com/embed/${ID}`,
-    `https://www.youtube.com/shorts/${ID}`,
-    `https://m.youtube.com/watch?v=${ID}`,
-    `youtube.com/watch?v=${ID}`,
-    ID,
-  ])('reads %s', url => {
-    expect(extractYouTubeVideoId(url)).toBe(ID);
-  });
-
-  it('rejects non-YouTube and malformed input', () => {
-    expect(extractYouTubeVideoId('https://vimeo.com/123456')).toBeNull();
-    expect(
-      extractYouTubeVideoId('https://www.youtube.com/watch?v=short'),
-    ).toBeNull();
-    expect(extractYouTubeVideoId('')).toBeNull();
-  });
-});
 
 describe('parseCueTime', () => {
   it('reads SRT, VTT and short forms', () => {
