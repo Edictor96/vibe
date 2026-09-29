@@ -1876,7 +1876,7 @@ const SmartBloomWorkflow = ({ onUploadComplete }: SmartBloomWorkflowProps = {}) 
     const match = youtubeUrl
       .trim()
       .match(/^(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})(?:[?&#/]\S*)?$/);
-    return match ? `https://www.youtube.com/watch?v=${match[1]}` : null;
+    return match ? `https://www.youtube.com/watch?v=${encodeURIComponent(match[1])}` : null;
   }, [youtubeUrl]);
 
   const isValidYouTubeUrl = (url: string): boolean => {
