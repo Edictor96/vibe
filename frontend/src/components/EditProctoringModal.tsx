@@ -23,16 +23,7 @@ import {
   SelectValue,
 } from "./ui/select"
 
-enum ProctoringComponent {
-  CAMERAMICRO = 'cameraMic',
-  BLURDETECTION = 'blurDetection',
-  FACECOUNTDETECTION = 'faceCountDetection',
-  HANDGESTUREDETECTION = 'handGestureDetection',
-  VOICEDETECTION = 'voiceDetection',
-  VIRTUALBACKGROUNDDETECTION = 'virtualBackgroundDetection',
-  RIGHTCLICKDISABLED = 'rightClickDisabled',
-  FACERECOGNITION = 'faceRecognition',
-}
+import { ProctoringComponent, proctoringLabelMap } from "./proctoring-detectors";
 
 // Throw-safe id conversion: ObjectIds may serialize as a hex string or a
 // buffer-like object depending on the endpoint. Never throw (a throw here would
@@ -54,17 +45,6 @@ const normalizeId = (value: any): string => {
 function VersionLabel({ versionId }: { versionId: string }) {
   const { data } = useCourseVersionById(versionId, true);
   return <>{data?.version ?? `Version ${versionId.slice(-6)}`}</>;
-}
-
-const labelMap: Record<string, string> = {
-  cameraMic: "Camera + Microphone",
-  blurDetection: "Blur Detection",
-  faceCountDetection: "Face Count Detection",
-  handGestureDetection: "Hand Gesture Detection",
-  voiceDetection: "Voice Detection",
-  virtualBackgroundDetection: "Virtual Background Detection",
-  rightClickDisabled: "Right Click Disabled",
-  faceRecognition: "Face Recognition",
 }
 
 export function ProctoringModal({
@@ -94,6 +74,9 @@ export function ProctoringModal({
   const [linearProgressionEnabled, setLinearProgressionEnabled] = useState(true);
   const [seekForwardEnabled, setSeekForwardEnabled] = useState(false);
   const [hpSystemEnabled, setHpSystemEnabled] = useState(false);
+  const [caseStudiesEnabled, setCaseStudiesEnabled] = useState(false);
+  const [caseStudyStrictUnlockEnabled, setCaseStudyStrictUnlockEnabled] = useState(true);
+  const [caseStudyWeakStreakThreshold, setCaseStudyWeakStreakThreshold] = useState(3);
   const [baseHp, setbaseHp] = useState<number>(0);
   const [isPublic, setIsPublic] = useState(false);
   const [isAdditionalSettingsExpanded, setIsAdditionalSettingsExpanded] = useState(false);
@@ -157,6 +140,9 @@ export function ProctoringModal({
           setSeekForwardEnabled(result.settings?.seekForwardEnabled ?? false)
           setIsPublic(result.settings?.isPublic ?? false)
           setHpSystemEnabled(result.settings?.hpSystem ?? false)
+          setCaseStudiesEnabled(result.settings?.caseStudiesEnabled ?? false)
+          setCaseStudyStrictUnlockEnabled(result.settings?.caseStudyStrictUnlockEnabled ?? true)
+          setCaseStudyWeakStreakThreshold(result.settings?.caseStudyWeakStreakThreshold ?? 3)
           setbaseHp(result.settings?.baseHp ?? 0)
           setEnableRandomize(result.settings?.randomizeItems ?? false)
           setCrowdsourcedQuestionSubmissionEnabled(
@@ -204,8 +190,13 @@ export function ProctoringModal({
       }
     }
 
+    if (caseStudiesEnabled && (!Number.isInteger(caseStudyWeakStreakThreshold) || caseStudyWeakStreakThreshold < 1)) {
+      toast.error("The weak-response streak threshold must be a whole number of at least 1.")
+      return
+    }
+
     try {
-      const result = await editSettings(courseId, courseVersionId, detectors, isNew, linearProgressionEnabled, seekForwardEnabled, isPublic, hpSystemEnabled, baseHp, enableRandomize, crowdsourcedQuestionSubmissionEnabled)
+      const result = await editSettings(courseId, courseVersionId, detectors, isNew, linearProgressionEnabled, seekForwardEnabled, isPublic, hpSystemEnabled, baseHp, enableRandomize, crowdsourcedQuestionSubmissionEnabled, caseStudiesEnabled, caseStudyStrictUnlockEnabled, caseStudyWeakStreakThreshold)
 
       // Persist the follow-up invite configuration (separate endpoint).
       await updateFollowUpInvite(courseId, courseVersionId, {
@@ -300,7 +291,7 @@ export function ProctoringModal({
           htmlFor={detector.name}
           className="text-sm leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
         >
-          {labelMap[detector.name] || detector.name}
+          {proctoringLabelMap[detector.name] || detector.name}
         </label>
       </div>
     ) : (
@@ -314,7 +305,7 @@ export function ProctoringModal({
           htmlFor={detector.name}
           className="text-sm leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
         >
-          {labelMap[detector.name] || detector.name}
+          {proctoringLabelMap[detector.name] || detector.name}
         </label>
       </div>
     )
@@ -383,6 +374,49 @@ export function ProctoringModal({
                       <Switch checked={hpSystemEnabled} onCheckedChange={() => setHpSystemEnabled(prev => !prev)} />
                     </div>
                   </div>
+                  <div>
+                    <div className="flex items-center justify-between space-x-3">
+                      <div className="space-y-1">
+                        <Label className="text-sm font-medium">Case Studies</Label>
+                        <p className="text-xs text-muted-foreground">Enable the peer-reviewed case-study write/review activity for this course</p>
+                      </div>
+                      <Switch checked={caseStudiesEnabled} onCheckedChange={() => setCaseStudiesEnabled(prev => !prev)} />
+                    </div>
+                  </div>
+                  {caseStudiesEnabled && (
+                    <>
+                      <div>
+                        <div className="flex items-center justify-between space-x-3">
+                          <div className="space-y-1">
+                            <Label className="text-sm font-medium">Strict Unlock (peer-review gated)</Label>
+                            <p className="text-xs text-muted-foreground">
+                              On: students unlock the next case only after their response wins {" "}
+                              enough peer reviews. Off: the next case unlocks as soon as the {" "}
+                              previous one is submitted.
+                            </p>
+                          </div>
+                          <Switch
+                            checked={caseStudyStrictUnlockEnabled}
+                            onCheckedChange={() => setCaseStudyStrictUnlockEnabled(prev => !prev)}
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-sm font-medium">Weak-Response Streak Threshold</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Notify a student after this many consecutive case-study reviews where peers picked the other response over theirs
+                        </p>
+                        <Input
+                          type="number"
+                          value={caseStudyWeakStreakThreshold}
+                          min={1}
+                          max={20}
+                          onChange={(e) => setCaseStudyWeakStreakThreshold(Number(e.target.value))}
+                          placeholder="Enter streak threshold"
+                        />
+                      </div>
+                    </>
+                  )}
                   {hpSystemEnabled && (
                     <div className="space-y-2">
                       <Label className="text-sm font-medium">Base HP</Label>
