@@ -7,7 +7,13 @@ import {COURSES_TYPES} from '#courses/types.js';
 import {BaseService} from '#root/shared/classes/BaseService.js';
 import {QuestionBankRepository} from '../repositories/providers/mongodb/QuestionBankRepository.js';
 import {QuestionRepository} from '../repositories/providers/mongodb/QuestionRepository.js';
+import {QuizRepository} from '../repositories/providers/mongodb/QuizRepository.js';
 import {ICourseRepository} from '#root/shared/database/interfaces/ICourseRepository.js';
+import {IItemRepository} from '#root/shared/database/interfaces/IItemRepository.js';
+import {
+  buildQuestionBankCsv,
+  buildQuestionExportRow,
+} from '../utils/functions/questionBankCsv.js';
 import {MongoDatabase} from '#root/shared/database/providers/mongo/MongoDatabase.js';
 import {IQuestionBank} from '#root/shared/interfaces/quiz.js';
 import {IQuestionBankRef} from '#root/shared/interfaces/models.js';
@@ -24,6 +30,12 @@ class QuestionBankService extends BaseService {
 
     @inject(GLOBAL_TYPES.CourseRepo)
     private readonly courseRepository: ICourseRepository,
+
+    @inject(QUIZZES_TYPES.QuizRepo)
+    private readonly quizRepository: QuizRepository,
+
+    @inject(COURSES_TYPES.ItemRepo)
+    private readonly itemRepository: IItemRepository,
 
     @inject(GLOBAL_TYPES.Database)
     private readonly database: MongoDatabase,
@@ -182,6 +194,88 @@ class QuestionBankService extends BaseService {
       );
     });
   }
+
+  /**
+   * Find (or lazily create) the crowd "Submitted – Pending Validation" bank
+   * for a quiz's graded bank. Crowd-sourced student questions are parked here
+   * instead of the graded bank until peer-validated + instructor-approved, so
+   * they never enter graded quiz draws. The bank is NOT added to the quiz's
+   * questionBankRefs. See studentQuestions/CROWD_QUESTION_BANK.md.
+   */
+  async findOrCreateCrowdSubmittedBank(
+    gradedBankId: string,
+    sourceQuizId?: string | ObjectId,
+  ): Promise<string> {
+    const existing =
+      await this.questionBankRepository.findCrowdSubmittedBankByGradedBankId(
+        gradedBankId,
+      );
+    if (existing?._id) {
+      return existing._id.toString();
+    }
+
+    const gradedBank = await this.questionBankRepository.getById(gradedBankId);
+    if (!gradedBank) {
+      throw new NotFoundError(
+        `Graded question bank with ID ${gradedBankId} not found`,
+      );
+    }
+
+    const now = new Date();
+    const doc: IQuestionBank = {
+      courseId: gradedBank.courseId
+        ? new ObjectId(gradedBank.courseId.toString())
+        : undefined,
+      courseVersionId: gradedBank.courseVersionId
+        ? new ObjectId(gradedBank.courseVersionId.toString())
+        : undefined,
+      title: 'Submitted – Pending Validation: ' + (gradedBank.title || 'Quiz'),
+      description:
+        'Crowd-sourced student questions awaiting peer validation + instructor approval. Not part of the graded quiz.',
+      questions: [],
+      tags: ['CROWD_SUBMITTED'],
+      crowdSubmitted: true,
+      sourceGradedBankId: new ObjectId(gradedBankId),
+      sourceQuizId: sourceQuizId ? new ObjectId(sourceQuizId.toString()) : undefined,
+      createdAt: now,
+      updatedAt: now,
+    };
+    return this.questionBankRepository.create(doc);
+  }
+
+  /**
+   * Instructor-approval step of the crowd pipeline: move a peer-validated,
+   * instructor-approved crowd question OUT of its "Submitted – Pending
+   * Validation" bank and INTO the quiz's graded bank, so it counts toward
+   * grading. Idempotent and best-effort. Adds to graded BEFORE removing from
+   * submitted, so an interruption leaves the question in both (recoverable),
+   * never neither. Returns the graded bank id it was moved into, or null if
+   * the question is not in any crowd-submitted bank (e.g. already moved).
+   */
+  async promoteSubmittedQuestionToGraded(
+    questionId: string,
+  ): Promise<string | null> {
+    const banks =
+      (await this.questionBankRepository.getQuestionBanksByQuestionId(
+        questionId,
+      )) ?? [];
+    const submitted = banks.find(b => (b as IQuestionBank).crowdSubmitted);
+    if (!submitted || !submitted._id || !submitted.sourceGradedBankId) {
+      return null;
+    }
+    const gradedBankId = submitted.sourceGradedBankId.toString();
+    await this.addQuestion(gradedBankId, questionId);
+    // Detach from the submitted bank WITHOUT touching the question document.
+    // removeQuestion() soft deletes the question itself, which previously made
+    // every approved question vanish from the graded bank the instant it was
+    // promoted into it.
+    await this.questionBankRepository.pullQuestionFromBank(
+      submitted._id.toString(),
+      questionId,
+    );
+    return gradedBankId;
+  }
+
   async removeQuestion(
     questionBankId: string,
     questionId: string,
@@ -247,10 +341,16 @@ class QuestionBankService extends BaseService {
         questionBankId.toString(),
         session,
       );
-      //Return random question ids
-      const shuffledQuestions = questionBank.questions.sort(
-        () => 0.5 - Math.random(),
+      // Never draw a question still awaiting review, whichever bank it sits
+      // in. Filter before slicing so the quiz still gets `count` questions.
+      const pendingIds = await this.questionRepository.getPendingReviewIds(
+        questionBank.questions,
+        session,
       );
+      //Return random question ids
+      const shuffledQuestions = questionBank.questions
+        .filter(q => !pendingIds.has(q.toString()))
+        .sort(() => 0.5 - Math.random());
       //convert to string if they are ObjectIds
       const shuffledQuestionsAsString = shuffledQuestions.map(q =>
         q.toString(),
@@ -363,6 +463,124 @@ class QuestionBankService extends BaseService {
       return updatedBank;
     });
   }
+  /**
+   * Builds the question-bank review CSV for every quiz in a course version,
+   * in course order. Read-only: deliberately avoids ItemRepository
+   * .readItemsGroup, which inserts an empty group when one is missing.
+   */
+  async exportCourseVersionQuestionsCsv(
+    courseId: string,
+    versionId: string,
+  ): Promise<{csv: string; fileName: string; questionCount: number}> {
+    const version = await this.courseRepository.readVersion(versionId);
+    if (!version || version.courseId?.toString() !== courseId) {
+      throw new NotFoundError('Course version not found for this course');
+    }
+    const course = await this.courseRepository.read(courseId);
+
+    const byOrder = <T extends {order: string}>(a: T, b: T) =>
+      a.order.localeCompare(b.order);
+    const liveModules = (version.modules ?? [])
+      .filter(m => !m.isDeleted)
+      .sort(byOrder)
+      .map(m => ({
+        module: m,
+        sections: (m.sections ?? [])
+          .filter(s => !s.isDeleted && s.itemsGroupId)
+          .sort(byOrder),
+      }));
+
+    const groupIds = liveModules.flatMap(m =>
+      m.sections.map(s => s.itemsGroupId.toString()),
+    );
+    const groups = groupIds.length
+      ? await this.itemRepository.getItemGroupsByIds(groupIds)
+      : [];
+    const groupById = new Map(
+      groups
+        .filter((g: any) => !g.isDeleted)
+        .map(g => [g._id.toString(), g]),
+    );
+
+    const quizRefsFor = (itemsGroupId: string) =>
+      [...(groupById.get(itemsGroupId)?.items ?? [])]
+        .filter(item => item.type === 'QUIZ')
+        .sort(byOrder);
+
+    const quizIds = groupIds.flatMap(id =>
+      quizRefsFor(id).map(item => item._id.toString()),
+    );
+    const quizzes = quizIds.length
+      ? (await this.quizRepository.getByIds(quizIds)) ?? []
+      : [];
+    const quizById = new Map(
+      quizzes
+        .filter(q => !q.isDeleted)
+        .map(q => [q._id.toString(), q]),
+    );
+
+    const bankIds = [...quizById.values()].flatMap(q =>
+      (q.details?.questionBankRefs ?? []).map(ref => ref.bankId.toString()),
+    );
+    const banks = await this.questionBankRepository.getByIds([
+      ...new Set(bankIds),
+    ]);
+    const bankById = new Map(banks.map(b => [b._id.toString(), b]));
+
+    const questionIds = banks.flatMap(b => b.questions.map(q => q.toString()));
+    const questions = questionIds.length
+      ? await this.questionRepository.getByIds([...new Set(questionIds)])
+      : [];
+    const questionById = new Map(
+      questions
+        .filter(q => !q.isDeleted)
+        .map(q => [q._id.toString(), q]),
+    );
+
+    const rows: ReturnType<typeof buildQuestionExportRow>[] = [];
+    for (const {module, sections} of liveModules) {
+      for (const section of sections) {
+        for (const quizRef of quizRefsFor(section.itemsGroupId.toString())) {
+          const quiz = quizById.get(quizRef._id.toString());
+          if (!quiz) continue;
+          let questionNumber = 0;
+          for (const ref of quiz.details?.questionBankRefs ?? []) {
+            const bank = bankById.get(ref.bankId.toString());
+            if (!bank) continue;
+            for (const questionId of bank.questions) {
+              const question = questionById.get(questionId.toString());
+              if (!question) continue;
+              rows.push(
+                buildQuestionExportRow(question, {
+                  moduleName: module.name,
+                  sectionName: section.name,
+                  quizName: quiz.name,
+                  bankTitle: bank.title,
+                  questionNumber: ++questionNumber,
+                }),
+              );
+            }
+          }
+        }
+      }
+    }
+
+    const slug = (value: string) =>
+      value
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 60);
+    const fileName = `${slug(course?.name ?? 'course') || 'course'}_${
+      slug(version.version ?? '') || versionId
+    }_question_bank.csv`;
+
+    return {
+      csv: buildQuestionBankCsv(rows),
+      fileName,
+      questionCount: rows.length,
+    };
+  }
+
   async getBanksUsingQuestion(questionId): Promise<IQuestionBank[]> {
     throw new Error('Method not implemented.');
   }

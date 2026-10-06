@@ -44,12 +44,27 @@ import {
   ISubmission,
 } from '#root/modules/quizzes/interfaces/index.js';
 import { Cohort } from '#root/modules/courses/classes/index.js';
+import { COHORT_SCOPED_ROLES } from '#root/shared/functions/cohortScope.js';
 import { SETTING_TYPES } from '#root/modules/setting/types.js';
 import { HP_SYSTEM_TYPES } from '#root/modules/hpSystem/types.js';
 import { LedgerRepository } from '#root/modules/hpSystem/repositories/index.js';
+import { isGuruSetuProgressCourse, GURU_SETU_PROGRESS_COURSES } from '#root/modules/users/constants.js';
 
+// Only used below to seed GURU_SETU_FEEDBACK_EXPORT_COURSES's first entry.
+// Progress-calculation gating in this file now goes through
+// isGuruSetuProgressCourse/GURU_SETU_PROGRESS_COURSES (constants.ts) instead.
 const GURU_SETU_COURSE_ID = '6981df886e100cfe04f9c4ad';
 const GURU_SETU_VERSION_ID = '6981df886e100cfe04f9c4ae';
+
+// Course/version pairs allowed to use the Gurusetu feedback export
+// specifically (scoped separately from GURU_SETU_COURSE_ID/VERSION_ID above,
+// which gate unrelated Gurusetu-specific behavior elsewhere in this file).
+// Each entry must also be added to GURU_SETU_PILOT_COURSES in the frontend's
+// gurusetu-feedback-export.ts, or the download link won't show up at all.
+const GURU_SETU_FEEDBACK_EXPORT_COURSES: ReadonlyArray<{courseId: string; versionId: string}> = [
+  {courseId: GURU_SETU_COURSE_ID, versionId: GURU_SETU_VERSION_ID}, // Gurusetu Pilot (FDP for Faculty)
+  {courseId: '6a9a7eb5de600629c9fb9405', versionId: '6a9a7eb5de600629c9fb9406'}, // GuruSetu Psychological Literacy Special Pilot
+];
 
 @injectable()
 export class EnrollmentService extends BaseService {
@@ -185,7 +200,14 @@ export class EnrollmentService extends BaseService {
         enrollmentDate: new Date(),
         percentCompleted: 0,
         completedItemsCount: 0,
-        ...(cohort ? { cohortId: new ObjectId(cohort) } : {}),
+        // A learner belongs to a cohort; staff are *scoped to* one. Same input,
+        // two different fields — putting a staff cohort in `cohortId` would
+        // make an instructor look like a member of the batch they teach.
+        ...(cohort
+          ? COHORT_SCOPED_ROLES.has(role)
+            ? { assignedCohortIds: [new ObjectId(cohort)] }
+            : { cohortId: new ObjectId(cohort) }
+          : {}),
         ...(policyAcknowledged ? { policyAcknowledgedAt: new Date() } : {}),
         ...(role === 'STUDENT' ? { hpPoints: baseHpValue } : {}),
       };
@@ -318,6 +340,123 @@ export class EnrollmentService extends BaseService {
       // }
 
       return existingEnrollment;
+    });
+  }
+
+  /**
+   * Resolve which cohort a per-student read should run against, refusing the
+   * read when that student sits outside the caller's cohort scope.
+   *
+   * Single-student endpoints cannot simply filter by an `$in` — there is
+   * exactly one relevant cohort, the student's own. Omitting `cohortId` used
+   * to make the lookup cohort-agnostic, which is how a scoped instructor could
+   * read a learner belonging to somebody else's cohort.
+   */
+  async resolveStudentCohort(
+    userId: string,
+    courseId: string,
+    courseVersionId: string,
+    scope: ObjectId[] | null,
+    requestedCohortId?: string,
+  ): Promise<string | undefined> {
+    if (scope === null) return requestedCohortId;
+
+    const enrollment = await this.enrollmentRepo.findAnyEnrollment(
+      userId,
+      courseId,
+      courseVersionId,
+    );
+    const studentCohortId = enrollment?.isDeleted
+      ? undefined
+      : enrollment?.cohortId?.toString();
+
+    const inScope =
+      studentCohortId && scope.some(id => id.toString() === studentCohortId);
+    if (!inScope) {
+      throw new ForbiddenError(
+        'This student is not in a cohort you have access to',
+      );
+    }
+
+    return requestedCohortId ?? studentCohortId;
+  }
+
+  /**
+   * Replace the cohorts a staff member is confined to on a course version.
+   *
+   * Only cohorts the version actually owns can be assigned, so an assignment
+   * can never reference another course's cohort — which is what makes the
+   * resolved scope safe to use as a filter without re-checking downstream.
+   */
+  async assignCohorts(
+    userId: string,
+    courseId: string,
+    courseVersionId: string,
+    cohortIds: string[],
+  ): Promise<{cohortIds: string[]}> {
+    return this._withTransaction(async (session: ClientSession) => {
+      const enrollment = await this.enrollmentRepo.findAnyEnrollment(
+        userId,
+        courseId,
+        courseVersionId,
+        undefined,
+        session,
+      );
+      // findAnyEnrollment matches soft-deleted rows, but the update below does
+      // not — without this the call would validate against a removed
+      // enrollment, write nothing, and report success.
+      if (!enrollment || enrollment.isDeleted) {
+        throw new NotFoundError(
+          'Enrollment not found for the user in the specified course version',
+        );
+      }
+      if (!COHORT_SCOPED_ROLES.has(enrollment.role)) {
+        throw new BadRequestError(
+          `Cohorts can only be assigned to ${[...COHORT_SCOPED_ROLES].join('/')} enrollments, not ${enrollment.role}`,
+        );
+      }
+
+      // An admin is unrestricted by global role, so a stored assignment would
+      // never be consulted. Refuse rather than record a scope that is not in
+      // force and would read on screen as though it were.
+      const target = await this.userRepo.findById(userId, session);
+      const globalRoles = Array.isArray(target?.roles)
+        ? target.roles
+        : [target?.roles];
+      if (
+        globalRoles.some(r => typeof r === 'string' && r.toLowerCase() === 'admin')
+      ) {
+        throw new BadRequestError(
+          'Administrators are not confined to cohorts, so an assignment would have no effect',
+        );
+      }
+
+      const courseVersion = await this.courseRepo.readVersion(
+        courseVersionId,
+        session,
+      );
+      if (!courseVersion) throw new NotFoundError('Course version not found');
+
+      const versionCohorts = new Set(
+        (courseVersion.cohorts ?? []).map(id => id.toString()),
+      );
+      const unknown = cohortIds.filter(id => !versionCohorts.has(id));
+      if (unknown.length > 0) {
+        throw new BadRequestError(
+          `Cohort(s) ${unknown.join(', ')} do not belong to this course version`,
+        );
+      }
+
+      const deduped = [...new Set(cohortIds)];
+      await this.enrollmentRepo.updateAssignedCohorts(
+        userId,
+        courseId,
+        courseVersionId,
+        deduped.map(id => new ObjectId(id)),
+        session,
+      );
+
+      return {cohortIds: deduped};
     });
   }
 
@@ -748,7 +887,7 @@ export class EnrollmentService extends BaseService {
             enrollmentDate: new Date(enr.enrollmentDate),
             assignedTimeSlot: enr.assignedTimeSlots,
             course: this.filterCourseVersions(enr.course, enrolledVersionIds),
-            percentCompleted: enr.percentCompleted || 0,
+            percentCompleted: enr.percentCompleted ?? 0,
             moduleNumber: enr.moduleNumber,
             sectionNumber: enr.sectionNumber,
             itemType: enr.itemType,
@@ -910,12 +1049,7 @@ export class EnrollmentService extends BaseService {
           let totalCompletedItemsCount = completedCount;
 
           // Guru Setu Override
-          // console.log(`Checking Guru Setu for course ${enr.courseId?.toString()} and version ${versionIdStr}`);
-          if (
-            enr.courseId?.toString() === GURU_SETU_COURSE_ID &&
-            versionIdStr === GURU_SETU_VERSION_ID
-          ) {
-            // console.log(`Guru Setu Match Found for user ${userId}`);
+          if (isGuruSetuProgressCourse(enr.courseId?.toString(), versionIdStr)) {
             const guruProgress =
               await this.progressService.calculateGuruSetuProgress(
                 userId,
@@ -982,7 +1116,7 @@ export class EnrollmentService extends BaseService {
               enrollmentDate: new Date(enr.enrollmentDate),
               course: this.filterCourseVersions(enr.course, enrolledVersionIds),
               // courseVersion: enr.courseVersion,
-              percentCompleted: enr.percentCompleted || 0,
+              percentCompleted: enr.percentCompleted ?? 0,
               assignedTimeSlot: enr.assignedTimeSlots,
               moduleNumber: enr.moduleNumber,
               sectionNumber: enr.sectionNumber,
@@ -1059,9 +1193,19 @@ export class EnrollmentService extends BaseService {
     sortOrder: 'asc' | 'desc',
     filter: string,
     statusTab: 'ACTIVE' | 'INACTIVE' = 'ACTIVE',
-    cohort?: string,
+    cohortScope?: ObjectId[] | null,
   ) {
     return this._withTransaction(async (session: ClientSession) => {
+      if (!ObjectId.isValid(courseId) || !ObjectId.isValid(courseVersionId)) {
+        // readVersion below would throw a BSONError (surfacing as a 500) on a
+        // malformed id; treat it the same as an unknown version.
+        return {
+          enrollments: [],
+          totalCount: 0,
+          totalPages: 0,
+          currentPage: 0,
+        };
+      }
       const courseVersion = await this.courseRepo.readVersion(
         courseVersionId,
         session,
@@ -1086,8 +1230,7 @@ export class EnrollmentService extends BaseService {
           sortOrder,
           filter,
           statusTab,
-          cohort,
-          (courseVersion.cohorts || []).map(cohort => new ObjectId(cohort)),
+          cohortScope,
           session,
         );
       return enrollmentsData;
@@ -1226,11 +1369,13 @@ export class EnrollmentService extends BaseService {
 
       let currentPercentCompleted = Number(detail?.percentCompleted ?? 0);
       let currentCompletedItemsCount = completedItemsCount;
+      // Paired with completedItemsCount so a caller never divides a
+      // Guru-Setu-override numerator (feedback forms submitted) by the
+      // general all-item-types total (videos included) -- defaults to the
+      // general total and is only overridden alongside the numerator below.
+      let currentCompletedItemsTotal = totalItems;
 
-      if (
-        courseId?.toString() === GURU_SETU_COURSE_ID &&
-        courseVersionId?.toString() === GURU_SETU_VERSION_ID
-      ) {
+      if (isGuruSetuProgressCourse(courseId, courseVersionId)) {
         const guruProgress =
           await this.progressService.calculateGuruSetuProgress(
             userId,
@@ -1238,6 +1383,7 @@ export class EnrollmentService extends BaseService {
           );
         currentPercentCompleted = guruProgress.percentCompleted;
         currentCompletedItemsCount = guruProgress.completedItemsCount;
+        currentCompletedItemsTotal = guruProgress.totalFeedbackItems;
       }
 
       return {
@@ -1247,6 +1393,7 @@ export class EnrollmentService extends BaseService {
           itemCounts: resolvedItemCounts,
         },
         completedItemsCount: currentCompletedItemsCount,
+        completedItemsTotal: currentCompletedItemsTotal,
         percentCompleted: currentPercentCompleted,
         totalQuizScore,
         totalQuizMaxScore,
@@ -1286,6 +1433,44 @@ export class EnrollmentService extends BaseService {
         session,
       );
     });
+  }
+
+  /**
+   * Refresh the cached average watch hours for every course version that has
+   * active students. Driven by the scheduled statistics job.
+   *
+   * Versions are refreshed one at a time rather than in parallel: the point of
+   * moving this work off the request path was to stop it hurting the database,
+   * so it must not be replaced by a burst of concurrent aggregations. One
+   * version failing is logged and does not abandon the rest of the run.
+   */
+  async refreshCourseVersionWatchStats(): Promise<{
+    refreshed: number;
+    failed: number;
+  }> {
+    const versions =
+      await this.enrollmentRepo.getCourseVersionsWithActiveEnrollments();
+
+    let refreshed = 0;
+    let failed = 0;
+
+    for (const {courseId, courseVersionId} of versions) {
+      try {
+        await this.enrollmentRepo.refreshCourseVersionWatchStats(
+          courseId,
+          courseVersionId,
+        );
+        refreshed += 1;
+      } catch (err) {
+        failed += 1;
+        console.error(
+          `[enrollment-stats] failed to refresh ${courseId}/${courseVersionId}:`,
+          err,
+        );
+      }
+    }
+
+    return {refreshed, failed};
   }
 
   /**
@@ -1391,6 +1576,7 @@ export class EnrollmentService extends BaseService {
     versionId: string,
     statusTab: 'ACTIVE' | 'INACTIVE' = 'ACTIVE',
     cohortId?: string,
+    scopedCohortIds?: ObjectId[] | null,
   ): Promise<QuizScoresExportResponseDto> {
     try {
       // Verify course and version exist in a single transaction
@@ -1418,12 +1604,15 @@ export class EnrollmentService extends BaseService {
             throw new NotFoundError('Cohort not found in this course version');
           }
           cohortIds = [cohortId];
-          cohorts = await this.courseRepo.getCohortsByIds(cohortIds);
+        } else if (scopedCohortIds) {
+          // "No cohort requested" means every cohort the caller holds, not
+          // every cohort on the version.
+          cohortIds = scopedCohortIds.map(id => id.toString());
         } else {
           // Get all cohorts for the version
           cohortIds = version.cohorts.map(id => id.toString());
-          cohorts = await this.courseRepo.getCohortsByIds(cohortIds);
         }
+        cohorts = await this.courseRepo.getCohortsByIds(cohortIds);
         cohortMap = new Map(cohorts.map(c => [c._id.toString(), c.name]));
       }
 
@@ -1470,9 +1659,12 @@ export class EnrollmentService extends BaseService {
         throw new NotFoundError('Course version not found');
       }
 
-      if (courseId !== GURU_SETU_COURSE_ID || versionId !== GURU_SETU_VERSION_ID) {
+      const isAllowedPilotCourse = GURU_SETU_FEEDBACK_EXPORT_COURSES.some(
+        pair => pair.courseId === courseId && pair.versionId === versionId,
+      );
+      if (!isAllowedPilotCourse) {
         throw new BadRequestError(
-          'This export is available only for Gurusetu Pilot(FDP for Faculty).',
+          'This export is available only for Gurusetu pilot courses.',
         );
       }
 
@@ -1721,10 +1913,7 @@ export class EnrollmentService extends BaseService {
             );
 
             // Guru Setu Override
-            if (
-              courseVersion.courseId.toString() === GURU_SETU_COURSE_ID &&
-              courseVersion._id.toString() === GURU_SETU_VERSION_ID
-            ) {
+            if (isGuruSetuProgressCourse(courseVersion.courseId.toString(), courseVersion._id.toString())) {
               const guruProgress =
                 await this.progressService.calculateGuruSetuProgress(
                   enrollment.userId.toString(),
@@ -1921,8 +2110,15 @@ export class EnrollmentService extends BaseService {
     const MAX_CONCURRENCY = 4;
 
     if (versionId) {
-      if (versionId === GURU_SETU_VERSION_ID) {
-        return this.bulkUpdateGuruSetuProgress(courseId, versionId, userId);
+      const guruSetuMatch = GURU_SETU_PROGRESS_COURSES.find(
+        c => c.versionId === versionId,
+      );
+      if (guruSetuMatch) {
+        return this.bulkUpdateGuruSetuProgress(
+          guruSetuMatch.courseId,
+          guruSetuMatch.versionId,
+          userId,
+        );
       }
       const result =
         await this.enrollmentRepo.bulkUpdateCompletedItemsCountForCourseVersion(
@@ -1951,10 +2147,13 @@ export class EnrollmentService extends BaseService {
         const currentIndex = index++;
         const courseVersionId = courseVersionIds[currentIndex];
 
-        if (courseVersionId === GURU_SETU_VERSION_ID) {
+        const guruSetuMatch = GURU_SETU_PROGRESS_COURSES.find(
+          c => c.versionId === courseVersionId,
+        );
+        if (guruSetuMatch) {
           const result = await this.bulkUpdateGuruSetuProgress(
-            courseId,
-            courseVersionId,
+            guruSetuMatch.courseId,
+            guruSetuMatch.versionId,
             userId,
           );
           results.push(result);
@@ -1982,19 +2181,22 @@ export class EnrollmentService extends BaseService {
 
   /**
    * Bulk updates progress for Guru Setu students using feedback-based logic.
+   * courseId/versionId must be one of GURU_SETU_PROGRESS_COURSES -- callers
+   * resolve the matching pair themselves rather than this method assuming
+   * which pilot course it's running for.
    */
   private async bulkUpdateGuruSetuProgress(
-    courseId?: string,
-    versionId?: string,
+    courseId: string,
+    versionId: string,
     userId?: string,
   ): Promise<{ totalCount: number; updatedCount: number }> {
     const filter: any = {
-      courseVersionId: new ObjectId(GURU_SETU_VERSION_ID),
+      courseVersionId: new ObjectId(versionId),
+      courseId: new ObjectId(courseId),
       role: 'STUDENT',
       isDeleted: { $ne: true },
     };
     if (userId) filter.userId = new ObjectId(userId);
-    if (courseId) filter.courseId = new ObjectId(GURU_SETU_COURSE_ID);
 
     const enrollments = await this.enrollmentRepo.findEnrollments(filter);
 
@@ -2005,7 +2207,7 @@ export class EnrollmentService extends BaseService {
         const guruProgress =
           await this.progressService.calculateGuruSetuProgress(
             userIdStr,
-            GURU_SETU_VERSION_ID,
+            versionId,
           );
 
         await this.enrollmentRepo.updateProgressPercentById(
@@ -2123,6 +2325,55 @@ export class EnrollmentService extends BaseService {
     };
 
     return session ? execute(session) : this._withTransaction(execute);
+  }
+
+  /**
+   * Award a student extra bookings (instructor action). Adds to the consumable
+   * pool so the student can book beyond their normal daily allowance. Returns
+   * the enrollment's new total commitmentExtraBookings.
+   */
+  async grantCommitmentExtraBookings(
+    userId: string,
+    courseId: string,
+    courseVersionId: string,
+    extraBookings: number,
+    session?: ClientSession,
+  ): Promise<number> {
+    const execute = async (session: ClientSession) => {
+      const enrollment = await this.enrollmentRepo.findActiveEnrollment(
+        userId,
+        courseId,
+        courseVersionId,
+        null,
+        session,
+      );
+      if (!enrollment) {
+        throw new NotFoundError('Enrollment not found for this student.');
+      }
+      return this.enrollmentRepo.addCommitmentExtraBookings(
+        enrollment._id?.toString(),
+        extraBookings,
+        session,
+      );
+    };
+
+    return session ? execute(session) : this._withTransaction(execute);
+  }
+
+  /**
+   * Consume one booking from a student's awarded extra-bookings pool. Called
+   * within the booking transaction when a student books beyond their normal
+   * daily allowance. Returns the new pool total.
+   */
+  async consumeCommitmentExtraBooking(
+    enrollmentId: string,
+    session?: ClientSession,
+  ): Promise<number> {
+    return this.enrollmentRepo.addCommitmentExtraBookings(
+      enrollmentId,
+      -1,
+      session,
+    );
   }
 
   /**
@@ -2487,6 +2738,13 @@ export class EnrollmentService extends BaseService {
       cohortId,
       session,
     );
+  }
+
+  async clearCohortReferences(
+    cohortId: string,
+    session: ClientSession,
+  ): Promise<void> {
+    return await this.enrollmentRepo.clearCohortReferences(cohortId, session);
   }
 
   async moveNonCohortStudentsToCohortInEnrollment(
@@ -2944,6 +3202,119 @@ export class EnrollmentService extends BaseService {
       limit: safeLimit,
       totalLearners: total,
       totalPages: Math.ceil(total / safeLimit),
+      learners,
+    };
+  }
+
+  /**
+   * Returns a paginated roster of candidates who have completed a single,
+   * specific course. Backs the server-to-server integration endpoint.
+   */
+  async getCourseCompletions(
+    courseId: string,
+    page: number,
+    limit: number,
+  ): Promise<{
+    page: number;
+    limit: number;
+    totalCandidates: number;
+    totalPages: number;
+    candidates: Array<{
+      userId: string;
+      email: string;
+      name: string;
+      courseVersionId: string;
+      completedAt?: Date;
+    }>;
+  }> {
+    if (!ObjectId.isValid(courseId)) {
+      throw new BadRequestError(`Invalid courseId: ${courseId}`);
+    }
+
+    const safePage = Math.max(1, Math.floor(page) || 1);
+    const safeLimit = Math.min(Math.max(1, Math.floor(limit) || 50), 200);
+    const skip = (safePage - 1) * safeLimit;
+
+    const { total, candidates } = await this.enrollmentRepo.getCourseCompletions(
+      courseId,
+      skip,
+      safeLimit,
+    );
+
+    return {
+      page: safePage,
+      limit: safeLimit,
+      totalCandidates: total,
+      totalPages: Math.ceil(total / safeLimit),
+      candidates,
+    };
+  }
+
+  /**
+   * Returns the paginated progress roster for one course version — every
+   * active student with a completion percentage, not just those who finished.
+   * Backs the server-to-server integration endpoint.
+   *
+   * An unknown course/version or an empty cohort yields an empty page rather
+   * than an error: "nobody has started yet" is a valid answer, not a fault.
+   */
+  async getCourseVersionProgress(
+    courseId: string,
+    courseVersionId: string,
+    cohortId: string | undefined,
+    page: number,
+    limit: number,
+  ): Promise<{
+    page: number;
+    limit: number;
+    totalLearners: number;
+    totalPages: number;
+    cohortId: string | null;
+    learners: Array<{
+      userId: string;
+      email: string;
+      name: string;
+      courseVersionId: string;
+      cohortId: string | null;
+      percentCompleted: number;
+      completedItems: number;
+      totalItems: number;
+      completed: boolean;
+      completedAt?: Date;
+      enrolledAt?: Date;
+    }>;
+  }> {
+    if (!ObjectId.isValid(courseId)) {
+      throw new BadRequestError(`Invalid courseId: ${courseId}`);
+    }
+    if (!ObjectId.isValid(courseVersionId)) {
+      throw new BadRequestError(`Invalid courseVersionId: ${courseVersionId}`);
+    }
+    // Reject rather than silently ignore: a typo'd cohortId that fell through
+    // would return every cohort's rows and look like correct data.
+    if (cohortId && !ObjectId.isValid(cohortId)) {
+      throw new BadRequestError(`Invalid cohortId: ${cohortId}`);
+    }
+
+    const safePage = Math.max(1, Math.floor(page) || 1);
+    const safeLimit = Math.min(Math.max(1, Math.floor(limit) || 50), 200);
+    const skip = (safePage - 1) * safeLimit;
+
+    const { total, learners } =
+      await this.enrollmentRepo.getCourseProgressRoster(
+        courseId,
+        courseVersionId,
+        cohortId,
+        skip,
+        safeLimit,
+      );
+
+    return {
+      page: safePage,
+      limit: safeLimit,
+      totalLearners: total,
+      totalPages: Math.ceil(total / safeLimit),
+      cohortId: cohortId ?? null,
       learners,
     };
   }

@@ -302,6 +302,9 @@ export class SettingRepository implements ISettingRepository {
     audit: AuditingDto,
     session?: ClientSession,
     crowdsourcedQuestionSubmissionEnabled: boolean = false,
+    caseStudiesEnabled: boolean = false,
+    caseStudyStrictUnlockEnabled: boolean = true,
+    caseStudyWeakStreakThreshold: number = 3,
   ): Promise<UpdateResult | null> {
     await this.init();
 
@@ -361,6 +364,9 @@ export class SettingRepository implements ISettingRepository {
           'settings.randomizeItems': randomizeItems,
           'settings.crowdsourcedQuestionSubmissionEnabled':
             crowdsourcedQuestionSubmissionEnabled,
+          'settings.caseStudiesEnabled': caseStudiesEnabled,
+          'settings.caseStudyStrictUnlockEnabled': caseStudyStrictUnlockEnabled,
+          'settings.caseStudyWeakStreakThreshold': caseStudyWeakStreakThreshold,
         },
         $push: {
           'settings.audit': audit,
@@ -884,6 +890,8 @@ export class SettingRepository implements ISettingRepository {
         $match: {
           isPublic: true,
           isDeleted: {$ne: true},
+          // a deactivated cohort is closed to new joiners; missing flag = active
+          isActive: {$ne: false},
           _id: {$nin: enrolledCohortIds.map(id => new ObjectId(id))},
         },
       },
@@ -898,6 +906,32 @@ export class SettingRepository implements ISettingRepository {
       },
 
       {$unwind: '$version'},
+
+      {
+        $match: {
+          'version.isDeleted': {$ne: true},
+          'version.versionStatus': {$ne: 'archived'},
+        },
+      },
+
+      // The course-level public switch governs its cohorts: a public cohort
+      // must not expose a course whose settings say it is private.
+      {
+        $lookup: {
+          from: 'courseSettings',
+          localField: 'courseVersionId',
+          foreignField: 'courseVersionId',
+          as: 'settings',
+        },
+      },
+
+      {$unwind: '$settings'},
+
+      {
+        $match: {
+          'settings.settings.isPublic': true,
+        },
+      },
 
       {
         $lookup: {
@@ -977,6 +1011,8 @@ export class SettingRepository implements ISettingRepository {
             {
               $match: {
                 'course.isDeleted': {$ne: true},
+                'version.isDeleted': {$ne: true},
+                'version.versionStatus': {$ne: 'archived'},
               },
             },
 

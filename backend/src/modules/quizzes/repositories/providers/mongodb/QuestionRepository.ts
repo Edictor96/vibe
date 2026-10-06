@@ -30,7 +30,7 @@ class QuestionRepository {
     session?: ClientSession,
   ): Promise<string | null> {
     await this.init();
-    const result = await this.questionCollection.insertOne(question);
+    const result = await this.questionCollection.insertOne(question, {session});
     if (result.acknowledged && result.insertedId) {
       return result.insertedId.toString();
     }
@@ -80,6 +80,28 @@ class QuestionRepository {
       .toArray();
     return results;
   }
+
+  /**
+   * Of the given question ids, the ones still awaiting review (see
+   * `isPendingReview`). Accepts ids stored as strings or ObjectIds — banks hold
+   * both — and returns them as strings.
+   */
+  public async getPendingReviewIds(
+    questionIds: (string | ObjectId)[],
+    session?: ClientSession,
+  ): Promise<Set<string>> {
+    await this.init();
+    if (!questionIds?.length) return new Set();
+    const objectIds = questionIds.map(id => new ObjectId(id.toString()));
+    const pending = await this.questionCollection
+      .find(
+        {_id: {$in: objectIds}, reviewStatus: 'PENDING_REVIEW'},
+        {projection: {_id: 1}, session},
+      )
+      .toArray();
+    return new Set(pending.map(q => q._id.toString()));
+  }
+
   public async update(
     questionId: string,
     updateData: Partial<BaseQuestion>,

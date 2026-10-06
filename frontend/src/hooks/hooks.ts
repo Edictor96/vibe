@@ -81,10 +81,12 @@ import type {
 } from '@/types/reportanomaly.types';
 
 import type { ProctoringSettings } from '@/types/video.types';
+import type { DetectorSetting } from '@/components/proctoring-detectors';
 import { InviteBody, InviteResponse, MessageResponse } from '@/types/invite.types';
 import { EntityType, IReport, ReportStatus } from '@/types/flag.types';
 import { PendingRegistrationNotification, ApprovedRegistrationNotification, PendingStudentRegistrationNotification, RejectedStudentRegistrationNotification } from '@/types/notification.types';
 import { useQueryClient, useQuery, useMutation } from '@tanstack/react-query';
+import { useAuthStore } from '@/store/auth-store';
 import { VersionWithCourse } from '@/app/pages/student/CourseRegistration';
 import { Registration, RegistrationStatus } from '@/app/pages/teacher/CourseRegistrationRequests';
 // import { Field } from '@/app/pages/teacher/components/course-registration-modal';
@@ -683,11 +685,11 @@ export function useStudentCurrentProgressPath(
 
 // GET /:userId/enrollments/courses/:courseId/versions/:versionId/progress-detail (API 2)
 export function useStudentProgressDetail(
-  userId?: string,
-  courseId?: string,
-  versionId?: string,
+  userId?: string | null,
+  courseId?: string | null,
+  versionId?: string | null,
   enabled?: boolean,
-  cohortId?: string
+  cohortId?: string | null
 ) {
   const result = api.useQuery(
     'get',
@@ -714,6 +716,12 @@ export function useStudentProgressDetail(
       enrollmentDate: string;
       percentCompleted: number;
       completedItemsCount: number;
+      // Paired with completedItemsCount: the total that count is "out of",
+      // using whichever formula produced completedItemsCount (plain item
+      // count normally; feedback-forms-submitted count for Guru-Setu-override
+      // courses, where contentCounts.totalItems below would include items --
+      // like videos -- that formula doesn't count).
+      completedItemsTotal?: number;
       assignedTimeSlots?: any[];
       contentCounts: {
         totalItems: number;
@@ -1046,10 +1054,16 @@ export function useUpdateCohort(): {
 }
 
 
+export interface DeleteCohortResponse {
+  message: string
+  requiresConfirmation?: boolean
+  pendingInviteCount?: number
+}
+
 export function useDeleteCohort(): {
-  mutate: (variables: { params: { path: { courseId: string, versionId: string, cohortId: string } } }) => void,
-  mutateAsync: (variables: { params: { path: { courseId: string, versionId: string, cohortId: string } } }) => Promise<CohortsResponse>,
-  data: CohortsResponse | undefined,
+  mutate: (variables: { params: { path: { courseId: string, versionId: string, cohortId: string }, query?: { confirmCancelInvites?: boolean } } }) => void,
+  mutateAsync: (variables: { params: { path: { courseId: string, versionId: string, cohortId: string }, query?: { confirmCancelInvites?: boolean } } }) => Promise<DeleteCohortResponse>,
+  data: DeleteCohortResponse | undefined,
   error: string | null,
   isPending: boolean,
   isSuccess: boolean,
@@ -1701,6 +1715,9 @@ export interface CourseEnrollmentStats {
   completedCount: number;
   averageProgressPercent: number;
   averageWatchHoursPerUser?: number;
+  // Null until the statistics job has computed watch hours for this course
+  // version; the dashboard shows it as not measured rather than as zero.
+  watchHoursComputedAt?: string | null;
 }
 
 export function useCourseEnrollmentsStats(
@@ -2079,6 +2096,79 @@ export function useUpdateItemOptional(): {
   }
 }
 
+// PUT /courses/versions/{versionId}/items/{itemId}/proctoring
+// Overrides this item's proctoring status, taking precedence over its
+// module's and the course's universal proctoring setting.
+export function useUpdateItemProctoring(): {
+  mutate: (variables: { params: { path: { versionId: ObjectId, itemId: ObjectId } } }) => void,
+  mutateAsync: (variables: {
+    params: { path: { versionId: ObjectId, itemId: ObjectId } },
+    body: { detectors: DetectorSetting[] | null }
+  }) => Promise<unknown>,
+  data: unknown | undefined,
+  error: string | null,
+  isPending: boolean,
+  isSuccess: boolean,
+  isError: boolean,
+  isIdle: boolean,
+} {
+  const queryClient = useQueryClient();
+  const result = api.useMutation("put", "/courses/versions/{versionId}/items/{itemId}/proctoring", {
+    onSuccess: () => {
+      // Without this, useItemById keeps serving its pre-update cached
+      // resolved detector list -- the override saved correctly, the UI
+      // just never knew to ask again.
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === "get" &&
+          query.queryKey[1] ===
+          "/courses/{courseId}/versions/{versionId}/modules/{moduleId}/sections/{sectionId}/item/{itemId}",
+      });
+    },
+  });
+  return {
+    ...result,
+    error: result.error ? (result.error.message || 'Failed to update item proctoring') : null
+  }
+}
+
+// PUT /courses/versions/{versionId}/modules/{moduleId}/proctoring
+// Overrides this module's proctoring status, taking precedence over the
+// course's universal setting for every item in the module without its own
+// item-level override.
+export function useUpdateModuleProctoring(): {
+  mutate: (variables: { params: { path: { versionId: ObjectId, moduleId: ObjectId } } }) => void,
+  mutateAsync: (variables: {
+    params: { path: { versionId: ObjectId, moduleId: ObjectId } },
+    body: { detectors: DetectorSetting[] | null }
+  }) => Promise<unknown>,
+  data: unknown | undefined,
+  error: string | null,
+  isPending: boolean,
+  isSuccess: boolean,
+  isError: boolean,
+  isIdle: boolean,
+} {
+  const queryClient = useQueryClient();
+  const result = api.useMutation("put", "/courses/versions/{versionId}/modules/{moduleId}/proctoring", {
+    onSuccess: () => {
+      // A module override changes the resolved detectors for every item in
+      // it that doesn't have its own item-level override -- invalidate every
+      // cached item, not just one, so none of them keep serving stale data.
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === "get" &&
+          query.queryKey[1] ===
+          "/courses/{courseId}/versions/{versionId}/modules/{moduleId}/sections/{sectionId}/item/{itemId}",
+      });
+    },
+  });
+  return {
+    ...result,
+    error: result.error ? (result.error.message || 'Failed to update module proctoring') : null
+  }
+}
+
 
 // PATCH /users/{userid}/progress/courses/{courseId}/versions/{courseVersionId}/reset
 export function useResetProgress(): {
@@ -2155,6 +2245,9 @@ export function useEditProctoringSettings() {
     baseHp: number,
     randomizeItems: boolean,
     crowdsourcedQuestionSubmissionEnabled: boolean = false,
+    caseStudiesEnabled: boolean = false,
+    caseStudyStrictUnlockEnabled: boolean = true,
+    caseStudyWeakStreakThreshold: number = 3,
   ) => {
     setLoading(true);
     setError(null);
@@ -2177,6 +2270,9 @@ export function useEditProctoringSettings() {
         baseHp,
         randomizeItems,
         crowdsourcedQuestionSubmissionEnabled,
+        caseStudiesEnabled,
+        caseStudyStrictUnlockEnabled,
+        caseStudyWeakStreakThreshold,
       };
 
       const res = await fetch(url, {
@@ -2251,6 +2347,54 @@ export function useUpdateFollowUpInvite() {
   };
 
   return { updateFollowUpInvite, loading, error };
+}
+
+// PATCH /users/{userId}/enrollments/courses/{courseId}/versions/{versionId}/cohorts
+// Replaces the cohorts an instructor is confined to on a course version. An
+// empty list clears the assignment, returning them to course-wide access.
+// Raw fetch rather than the generated client because this endpoint is not in
+// src/types/schema.ts yet — regenerate and switch to api.useMutation once it is.
+export function useAssignInstructorCohorts() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const assignCohorts = async (
+    userId: string,
+    courseId: string,
+    versionId: string,
+    cohortIds: string[],
+  ) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const url = `${import.meta.env.VITE_BASE_URL}/users/${userId}/enrollments/courses/${courseId}/versions/${versionId}/cohorts`;
+
+      const res = await fetch(url, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: `Bearer ${localStorage.getItem('firebase-auth-token')}`,
+        },
+        body: JSON.stringify({ cohortIds }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.message || `Failed to assign cohorts: ${res.status}`);
+      }
+
+      return data as { cohortIds: string[] };
+    } catch (err: any) {
+      setError(err.message || 'Unknown error');
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return { assignCohorts, loading, error };
 }
 
 // POST /setting/course-setting/{courseId}/{versionId}/follow-up-invite/backfill
@@ -2346,7 +2490,7 @@ export function useSubmitStudentQuestion(): {
     courseVersionId: string,
     segmentId: string,
     payload: import('@/types/student-question.types').StudentQuestionSubmissionPayload,
-  ) => Promise<{ questionId: string }>;
+  ) => Promise<import('@/types/student-question.types').StudentQuestionSubmissionResult>;
   loading: boolean;
   error: string | null;
 } {
@@ -2358,7 +2502,7 @@ export function useSubmitStudentQuestion(): {
     courseVersionId: string,
     segmentId: string,
     payload: import('@/types/student-question.types').StudentQuestionSubmissionPayload,
-  ): Promise<{ questionId: string }> => {
+  ): Promise<import('@/types/student-question.types').StudentQuestionSubmissionResult> => {
     setLoading(true);
     setError(null);
 
@@ -2403,6 +2547,7 @@ export function useListStudentQuestions(): {
     courseVersionId: string,
     status?: import('@/types/student-question.types').StudentQuestionStatusFilter,
     limit?: number,
+    gateState?: import('@/types/student-question.types').StudentQuestionGateStateFilter,
   ) => Promise<import('@/types/student-question.types').StudentQuestionListResponse>;
   listForSegment: (
     courseId: string,
@@ -2410,13 +2555,22 @@ export function useListStudentQuestions(): {
     segmentId: string,
     limit?: number,
   ) => Promise<import('@/types/student-question.types').StudentQuestionListResponse>;
+  getSegmentDetails: (
+    courseId: string,
+    courseVersionId: string,
+    segmentId: string,
+  ) => Promise<import('@/types/student-question.types').SegmentDetails>;
   loading: boolean;
   error: string | null;
 } {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const request = async (url: string) => {
+  // Memoized so their identity is stable across renders. Callers put these in
+  // useEffect/useCallback deps; unstable references caused an infinite fetch
+  // loop on the teacher review + segment panel. (Setters are stable; all inputs
+  // arrive as arguments.)
+  const request = useCallback(async (url: string) => {
     setLoading(true);
     setError(null);
     try {
@@ -2445,22 +2599,24 @@ export function useListStudentQuestions(): {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const listForCourseVersion = async (
+  const listForCourseVersion = useCallback(async (
     courseId: string,
     courseVersionId: string,
     status: import('@/types/student-question.types').StudentQuestionStatusFilter = 'ALL',
     limit = 100,
+    gateState?: import('@/types/student-question.types').StudentQuestionGateStateFilter,
   ) => {
     const params = new URLSearchParams();
     if (status && status !== 'ALL') params.set('status', status);
+    if (gateState && gateState !== 'ALL') params.set('gateState', gateState);
     params.set('limit', String(limit));
     const url = `${import.meta.env.VITE_BASE_URL}/student-questions/courses/${courseId}/versions/${courseVersionId}?${params.toString()}`;
     return await request(url);
-  };
+  }, [request]);
 
-  const listForSegment = async (
+  const listForSegment = useCallback(async (
     courseId: string,
     courseVersionId: string,
     segmentId: string,
@@ -2470,9 +2626,18 @@ export function useListStudentQuestions(): {
     params.set('limit', String(limit));
     const url = `${import.meta.env.VITE_BASE_URL}/student-questions/courses/${courseId}/versions/${courseVersionId}/segments/${segmentId}?${params.toString()}`;
     return await request(url);
-  };
+  }, [request]);
 
-  return { listForCourseVersion, listForSegment, loading, error };
+  const getSegmentDetails = useCallback(async (
+    courseId: string,
+    courseVersionId: string,
+    segmentId: string,
+  ) => {
+    const url = `${import.meta.env.VITE_BASE_URL}/student-questions/courses/${courseId}/versions/${courseVersionId}/segments/${segmentId}/details`;
+    return await request(url);
+  }, [request]);
+
+  return { listForCourseVersion, listForSegment, getSegmentDetails, loading, error };
 }
 
 export function useListMyStudentQuestions(): {
@@ -2486,7 +2651,10 @@ export function useListMyStudentQuestions(): {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const listMine = async (
+  // Memoized so its identity is stable across renders — callers put this in
+  // effect deps, and an unstable reference caused an infinite fetch loop on
+  // the My Submissions page. (Setters are stable; status/limit come from args.)
+  const listMine = useCallback(async (
     status: import('@/types/student-question.types').StudentQuestionStatusFilter = 'ALL',
     limit = 100,
   ) => {
@@ -2522,7 +2690,7 @@ export function useListMyStudentQuestions(): {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   return { listMine, loading, error };
 }
@@ -3379,9 +3547,17 @@ export function useQuestionBankById(questionBankId: string): {
   error: string | null,
   refetch: () => void
 } {
+  // A bank's question list changes outside this screen — approving a student
+  // submission promotes a question into it. The global 5-minute staleTime made
+  // those additions invisible until the cache expired, so this query opts out
+  // and always revalidates on mount.
   const result = api.useQuery("get", "/quizzes/question-bank/{questionBankId}", {
     params: { path: { questionBankId } }
-  }, { enabled: !!questionBankId && questionBankId !== '' });
+  }, {
+    enabled: !!questionBankId && questionBankId !== '',
+    staleTime: 0,
+    refetchOnMount: 'always',
+  });
 
   return {
     data: result.data,
@@ -3597,9 +3773,15 @@ export function useGetAllQuestionBanksForQuiz(quizId: string): {
   error: string | null,
   refetch: () => void
 } {
+  // Same reasoning as useQuestionBankById: bank membership and question counts
+  // change from the student-question review screen, so never serve this stale.
   const result = api.useQuery("get", "/quizzes/quiz/{quizId}/bank", {
     params: { path: { quizId } }
-  }, { enabled: !!quizId });
+  }, {
+    enabled: !!quizId,
+    staleTime: 0,
+    refetchOnMount: 'always',
+  });
 
   return {
     data: result.data,
@@ -4928,6 +5110,44 @@ export const exportQuizSubmissions = async (quizId: string) => {
   URL.revokeObjectURL(url);
 }
 
+// Downloads every quiz question in a course version (options, explanations,
+// correct answer) as a CSV for instructor review.
+export const exportCourseQuestionBank = async (courseId: string, versionId: string) => {
+  const authToken = localStorage.getItem('firebase-auth-token');
+
+  const response = await fetch(
+    `${import.meta.env.VITE_BASE_URL}/quizzes/question-bank/export/courses/${courseId}/versions/${versionId}`,
+    {
+      method: 'GET',
+      headers: {
+        'Authorization': authToken ? `Bearer ${authToken}` : '',
+      },
+      credentials: 'include',
+    },
+  );
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.message || `Failed to export question bank: ${response.statusText}`);
+  }
+
+  // blob() rather than text(): text() would strip the UTF-8 BOM Excel needs.
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const fileName =
+    disposition.match(/filename="([^"]+)"/)?.[1] ?? `question_bank_${versionId}.csv`;
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  URL.revokeObjectURL(url);
+}
+
 export function useModuleProgress(
   courseId: string,
   versionId: string,
@@ -5244,6 +5464,11 @@ export const useHideItem = (): {
 
 export interface GenerateAIQuestionsBody {
   text?: string;
+  courseId?: string;
+  versionId?: string;
+  difficulty?: 'beginner' | 'intermediate' | 'advanced';
+  focusAreas?: string;
+  avoidTopics?: string;
 }
 
 export const useGenerateAIQuestions = (): {
@@ -5837,6 +6062,46 @@ export function useGrantExtraHours() {
   return { grantExtraHours, loading, error };
 }
 
+// PUT /timeslots/grant-bookings — award a student extra bookings (a consumable
+// pool that lets them book beyond their daily allowance).
+export function useGrantExtraBookings() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const grantExtraBookings = async (
+    courseId: string,
+    courseVersionId: string,
+    studentId: string,
+    extraBookings: number,
+  ): Promise<{ commitmentExtraBookings: number }> => {
+    setLoading(true);
+    setError(null);
+    try {
+      const url = `${import.meta.env.VITE_BASE_URL}/timeslots/grant-bookings`;
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: `Bearer ${localStorage.getItem('firebase-auth-token')}`,
+        },
+        body: JSON.stringify({ courseId, courseVersionId, studentId, extraBookings }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.message || `Failed to award extra bookings: ${res.status}`);
+      }
+      return data?.data;
+    } catch (err: any) {
+      setError(err.message || 'Unknown error');
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return { grantExtraBookings, loading, error };
+}
+
 export interface SlotDemandData {
   date: string;
   isActive: boolean;
@@ -5984,27 +6249,68 @@ export function addDays(date: string, days: number): string {
   return `${yy}-${mm}-${dd}`;
 }
 
-// The study days a student may book *right now*, given the rule that booking for
-// day D opens 9 AM IST on D-2 and closes 9 AM IST on D:
-//   • today        — only before 9 AM IST
+// The study days a student may book *right now*. Booking for day D opens 9 AM
+// IST on D-2, and each individual slot stays bookable until its own start time
+// on D (see slotBookingClosed):
+//   • today        — all day (per-slot: only slots that haven't started yet)
 //   • tomorrow     — all day
-//   • day-after    — only from 9 AM IST
+//   • day-after    — only from 9 AM IST (its D-2 open time)
 export function bookableStudyDates(): string[] {
   const today = istToday();
   const hour = istHour();
-  const dates: string[] = [];
-  if (hour < 9) dates.push(today); // today, before the 9 AM cutoff
+  const dates: string[] = [today]; // today — slots bookable until they start
   dates.push(addDays(today, 1)); // tomorrow, always open
   if (hour >= 9) dates.push(addDays(today, 2)); // day-after, opens at 9 AM
   return dates;
 }
 
+// Minutes since midnight in IST (0–1439). Used to tell whether a slot on the
+// current IST day has already started (and so is no longer bookable).
+export function istNowMinutes(): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const h = Number(parts.find(p => p.type === 'hour')?.value ?? '0') % 24;
+  const m = Number(parts.find(p => p.type === 'minute')?.value ?? '0');
+  return h * 60 + m;
+}
+
+// A slot closes for booking at its own start time on the study day. Only the
+// current IST day can have already-started slots; future days are always open.
+export function slotBookingClosed(date: string, from: string): boolean {
+  if (date !== istToday()) return false;
+  const [h, m] = from.split(':').map(Number);
+  return h * 60 + m <= istNowMinutes();
+}
+
+// How many minutes before a slot's start a booking can no longer be cancelled.
+// Mirrors the backend CANCEL_CUTOFF_HOURS (1h).
+export const CANCEL_CUTOFF_MINUTES = 60;
+
+// A booking can be cancelled only up to CANCEL_CUTOFF_MINUTES before its slot
+// starts; after that (or once the slot has started/passed) it locks and counts
+// as an unused slot. Future study days are always cancellable; past days locked.
+export function slotCancelClosed(date: string, from: string): boolean {
+  const today = istToday();
+  if (date < today) return true; // a past study day — already locked
+  if (date > today) return false; // a future study day — well outside the cutoff
+  const [h, m] = from.split(':').map(Number);
+  return h * 60 + m - CANCEL_CUTOFF_MINUTES <= istNowMinutes();
+}
+
 // GET /slot-bookings/my/course/{courseId}/version/{courseVersionId}?date=
-// The calling student's active bookings for an IST day (default today).
+// The calling student's active bookings. Pass a YYYY-MM-DD `date` to restrict to
+// one IST study day; pass `null` to fetch ALL active bookings across every study
+// day (needed for the per-calendar-day allowance meter, which counts bookings by
+// the day they were MADE, not the day they're for). Omitting `date` defaults to
+// today for backward compatibility.
 export function useMyBookings(
   courseId: string | undefined,
   courseVersionId: string | undefined,
-  date?: string,
+  date?: string | null,
   enabled: boolean = true,
 ): {
   data: MyBooking[] | undefined;
@@ -6012,17 +6318,19 @@ export function useMyBookings(
   error: string | null;
   refetch: () => void;
 } {
-  const day = date ?? istToday();
+  const allDates = date === null;
+  const day = allDates ? undefined : date ?? istToday();
   const valid =
     !!courseId &&
     courseId.length === 24 &&
     !!courseVersionId &&
     courseVersionId.length === 24;
   const result = useQuery({
-    queryKey: ['my-bookings', courseId, courseVersionId, day],
+    queryKey: ['my-bookings', courseId, courseVersionId, allDates ? 'all' : day],
     enabled: enabled && valid,
     queryFn: async (): Promise<MyBooking[]> => {
-      const url = `${import.meta.env.VITE_BASE_URL}/slot-bookings/my/course/${courseId}/version/${courseVersionId}?date=${encodeURIComponent(day)}`;
+      const base = `${import.meta.env.VITE_BASE_URL}/slot-bookings/my/course/${courseId}/version/${courseVersionId}`;
+      const url = allDates ? base : `${base}?date=${encodeURIComponent(day as string)}`;
       const res = await fetch(url, {
         headers: {
           authorization: `Bearer ${localStorage.getItem('firebase-auth-token')}`,
@@ -6039,6 +6347,92 @@ export function useMyBookings(
     data: result.data,
     isLoading: result.isLoading,
     error: result.error ? (result.error as Error).message : null,
+    refetch: () => {
+      void result.refetch();
+    },
+  };
+}
+
+// GET /slot-bookings/my/extra-bookings/course/{courseId}/version/{courseVersionId}
+// How many instructor-awarded extra bookings the student may still make beyond
+// their daily allowance (a consumable pool). 0 when none granted.
+export function useMyExtraBookings(
+  courseId: string | undefined,
+  courseVersionId: string | undefined,
+  enabled: boolean = true,
+): { data: number; isLoading: boolean; refetch: () => void } {
+  const valid =
+    !!courseId &&
+    courseId.length === 24 &&
+    !!courseVersionId &&
+    courseVersionId.length === 24;
+  const result = useQuery({
+    queryKey: ['my-extra-bookings', courseId, courseVersionId],
+    enabled: enabled && valid,
+    queryFn: async (): Promise<number> => {
+      const url = `${import.meta.env.VITE_BASE_URL}/slot-bookings/my/extra-bookings/course/${courseId}/version/${courseVersionId}`;
+      const res = await fetch(url, {
+        headers: {
+          authorization: `Bearer ${localStorage.getItem('firebase-auth-token')}`,
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.message || `Failed to load extra bookings: ${res.status}`);
+      }
+      return Number(data?.data?.extraBookings ?? 0);
+    },
+  });
+  return {
+    data: result.data ?? 0,
+    isLoading: result.isLoading,
+    refetch: () => {
+      void result.refetch();
+    },
+  };
+}
+
+export interface MyHoursSummary {
+  hasBudget: boolean;
+  budgetHours: number | null;
+  reservedHours: number;
+  lostHours: number;
+  remainingHours: number | null;
+}
+
+// GET /slot-bookings/my/hours/course/{courseId}/version/{courseVersionId}
+// The student's committed-hours summary: budget, reserved, and hours LOST to
+// unused (unfulfilled) slots — used to warn them about wasted budget.
+export function useMyHoursSummary(
+  courseId: string | undefined,
+  courseVersionId: string | undefined,
+  enabled: boolean = true,
+): { data: MyHoursSummary | undefined; isLoading: boolean; refetch: () => void } {
+  const valid =
+    !!courseId &&
+    courseId.length === 24 &&
+    !!courseVersionId &&
+    courseVersionId.length === 24;
+  const result = useQuery({
+    queryKey: ['my-hours-summary', courseId, courseVersionId],
+    enabled: enabled && valid,
+    queryFn: async (): Promise<MyHoursSummary> => {
+      const url = `${import.meta.env.VITE_BASE_URL}/slot-bookings/my/hours/course/${courseId}/version/${courseVersionId}`;
+      const res = await fetch(url, {
+        headers: {
+          authorization: `Bearer ${localStorage.getItem('firebase-auth-token')}`,
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.message || `Failed to load hours summary: ${res.status}`);
+      }
+      return data?.data as MyHoursSummary;
+    },
+  });
+  return {
+    data: result.data,
+    isLoading: result.isLoading,
     refetch: () => {
       void result.refetch();
     },
@@ -6252,6 +6646,63 @@ export function useHpCourseVersions() {
     isLoading: query.isLoading,
     error: query.error ? (query.error as Error).message : null,
     refetch: query.refetch,
+  };
+}
+
+/**
+ * The HP System is opt-in per course version, so the instructor nav entry only
+ * earns its place once at least one of their courses uses it.
+ */
+export function useInstructorHasHpCourses() {
+  const { data, isLoading } = useHpCourseVersions();
+
+  return {
+    hasHpCourses: data.some(course => course.versions.length > 0),
+    isLoading,
+  };
+}
+
+/**
+ * Whether the instructor may still write to a version's HP data. A version whose
+ * HP System was switched off stays listed — and readable — but turns read-only.
+ */
+export function useHpVersionAccess(courseVersionId?: string) {
+  const { data, isLoading } = useHpCourseVersions();
+
+  const version = courseVersionId
+    ? data.flatMap(course => course.versions).find(v => v.courseVersionId === courseVersionId)
+    : undefined;
+
+  return {
+    isLoading,
+    // Unknown versions stay writable here; the backend is the authority and
+    // rejects the write if HP is in fact off.
+    readOnly: !isLoading && version?.hpEnabled === false,
+  };
+}
+
+/**
+ * Learner-side counterpart: HP surfaces exist for a student only while the
+ * course version they are enrolled in has the HP System switched on.
+ */
+export function useStudentHpEnabled(courseVersionId?: string) {
+  const { user, token } = useAuthStore();
+  const { data, isLoading } = useUserEnrollments(1, 100, !!token && !!user?.uid);
+
+  const enrollments = data?.enrollments ?? [];
+  const hpEnrollments = enrollments.filter(
+    e => e.hpSystem === true && e.status === 'ACTIVE',
+  );
+
+  return {
+    isLoading,
+    // Access to HP pages, including for a course the student has finished —
+    // their HP history stays theirs to read.
+    hpEnabled: courseVersionId
+      ? hpEnrollments.some(e => String(e.courseVersionId) === courseVersionId)
+      : hpEnrollments.length > 0,
+    // Narrower: worth a nav entry only while a course is still in progress.
+    hasCourseInProgress: hpEnrollments.some(e => e.percentCompleted !== 100),
   };
 }
 
@@ -7080,5 +7531,64 @@ export function useUserEnrollmentStats(enabled: boolean = true): {
       ? result.error.message || "Failed to fetch enrollment stats"
       : null,
     refetch: result.refetch,
+  };
+}
+
+export function useResetFace(): {
+  mutate: (variables: { params: { path: { userId: string, courseId: string, versionId: string } } }) => void,
+  mutateAsync: (variables: { params: { path: { userId: string, courseId: string, versionId: string } } }) => Promise<any>,
+  isPending: boolean,
+  error: string | null,
+  isSuccess: boolean,
+  isError: boolean,
+  status: 'idle' | 'pending' | 'success' | 'error'
+} {
+  const [status, setStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
+  const [error, setError] = useState<string | null>(null);
+
+  const mutateAsync = useCallback(async (variables: { params: { path: { userId: string, courseId: string, versionId: string } } }) => {
+    setStatus('pending');
+    setError(null);
+    try {
+      const authToken = localStorage.getItem('firebase-auth-token');
+      const { userId, courseId, versionId } = variables.params.path;
+      const response = await fetch(
+        `${import.meta.env.VITE_BASE_URL}/users/${userId}/enrollments/courses/${courseId}/versions/${versionId}/reset-face`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to reset face reference: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setStatus('success');
+      return data;
+    } catch (err: any) {
+      setStatus('error');
+      setError(err.message || 'Failed to reset face reference');
+      throw err;
+    }
+  }, []);
+
+  const mutate = useCallback((variables: { params: { path: { userId: string, courseId: string, versionId: string } } }) => {
+    mutateAsync(variables).catch(() => {});
+  }, [mutateAsync]);
+
+  return {
+    mutate,
+    mutateAsync,
+    isPending: status === 'pending',
+    error,
+    isSuccess: status === 'success',
+    isError: status === 'error',
+    status,
   };
 }

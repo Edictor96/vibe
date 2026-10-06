@@ -19,6 +19,7 @@ import {
   IsEnum,
   IsArray,
   IsInt,
+  IsIn,
 } from 'class-validator';
 import { JSONSchema } from 'class-validator-jsonschema';
 import { CourseVersion } from '../transformers/CourseVersion.js';
@@ -37,20 +38,53 @@ import {
   ID,
   IProjectDetails,
   IFeedBackFormDetails,
+  VideoSource,
+  IDetectorSettings,
 } from '#root/shared/interfaces/models.js';
 import { OnlyOneId } from './customValidators.js';
+import {
+  DetectorSettingsDto,
+  containsAllDetectors,
+} from '#root/modules/setting/classes/validators/CourseSettingValidators.js';
 
 class VideoDetailsPayloadValidator implements IVideoDetails {
   @JSONSchema({
+    title: 'Video Source',
+    description:
+      'Where the media comes from. Omit for YOUTUBE — every video item created ' +
+      'before uploads existed has no source, so absent must keep meaning YouTube.',
+    example: 'YOUTUBE',
+    type: 'string',
+    enum: ['YOUTUBE', 'GCS'],
+  })
+  @IsOptional()
+  @IsIn(['YOUTUBE', 'GCS'])
+  source?: VideoSource;
+
+  @JSONSchema({
     title: 'Video URL',
-    description: 'Public video URL (e.g., YouTube or Vimeo link)',
+    description:
+      'Public video URL (e.g., YouTube or Vimeo link). Required unless source is GCS.',
     example: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
     type: 'string',
   })
+  @ValidateIf(o => (o.source ?? 'YOUTUBE') === 'YOUTUBE')
   @IsNotEmpty()
   @IsString()
   @IsUrl()
-  URL: string;
+  URL?: string;
+
+  @JSONSchema({
+    title: 'Video Asset ID',
+    description:
+      'The uploaded video this item plays. Required when source is GCS, and ' +
+      'rejected otherwise so an item cannot claim both a URL and an upload.',
+    type: 'string',
+  })
+  @ValidateIf(o => o.source === 'GCS')
+  @IsNotEmpty()
+  @IsMongoId()
+  assetId?: string;
 
   @JSONSchema({
     title: 'Start Time',
@@ -286,6 +320,102 @@ class ProjectDetailsPayloadValidator implements IProjectDetails {
   description: string;
 }
 
+class ReflectionDetailsPayloadValidator {
+  @JSONSchema({
+    description:
+      'Optional prompt shown above the reflection editor. Defaults to a generic ask when omitted.',
+    example: 'What was the single most surprising idea in this section?',
+    type: 'string',
+  })
+  @IsString()
+  @IsOptional()
+  prompt?: string;
+
+  @JSONSchema({
+    description:
+      'Cap on how many peers may score one reflection (1-25). Defaults to 10.',
+    example: 10,
+    type: 'integer',
+  })
+  @IsInt()
+  @Min(1)
+  @Max(25)
+  @IsOptional()
+  maxReviewsPerReflection?: number;
+
+  @JSONSchema({
+    description:
+      'Reviews a student must complete before their own score unlocks (0-25). 0 disables reciprocity. Defaults to 10.',
+    example: 10,
+    type: 'integer',
+  })
+  @IsInt()
+  @Min(0)
+  @Max(25)
+  @IsOptional()
+  requiredReviewsToUnlock?: number;
+
+  @JSONSchema({
+    description:
+      'Reviews a reflection must receive before its average is shown (1-25). Defaults to 3.',
+    example: 3,
+    type: 'integer',
+  })
+  @IsInt()
+  @Min(1)
+  @Max(25)
+  @IsOptional()
+  minReviewsToReveal?: number;
+}
+
+class CaseStudyDetailsPayloadValidator {
+  @JSONSchema({
+    description:
+      'The case scenario/prompt shown to the learner (markdown). Required for a usable case.',
+    example: 'A student keeps giving confidently wrong answers in class...',
+    type: 'string',
+  })
+  @IsString()
+  @IsOptional()
+  bodyMarkdown?: string;
+
+  @JSONSchema({
+    description:
+      'Wins a response needs before it leaves the review pool (1-25). Defaults to 7.',
+    example: 7,
+    type: 'integer',
+  })
+  @IsInt()
+  @Min(1)
+  @Max(25)
+  @IsOptional()
+  reviewsRequired?: number;
+
+  @JSONSchema({
+    description:
+      'Comparisons each learner must judge (1-25). Defaults to 7.',
+    example: 7,
+    type: 'integer',
+  })
+  @IsInt()
+  @Min(1)
+  @Max(25)
+  @IsOptional()
+  picksRequired?: number;
+
+  @JSONSchema({
+    description:
+      'Consecutive losses before the author is prompted to revise (0-25, 0 disables). Defaults to 3.',
+    example: 3,
+    type: 'integer',
+  })
+  @IsInt()
+  @Min(0)
+  @Max(25)
+  @IsOptional()
+  weakStreakThreshold?: number;
+}
+
 class CreateItemBody implements Partial<IBaseItem> {
   @JSONSchema({
     description: 'Title of the item',
@@ -330,7 +460,7 @@ class CreateItemBody implements Partial<IBaseItem> {
     description: 'Type of the item: VIDEO, BLOG, or QUIZ',
     example: 'VIDEO',
     type: 'string',
-    enum: ['VIDEO', 'BLOG', 'QUIZ', 'PROJECT', 'FEEDBACK'],
+    enum: ['VIDEO', 'BLOG', 'QUIZ', 'PROJECT', 'FEEDBACK', 'REFLECTION', 'CASE_STUDY'],
   })
   @IsEnum(ItemType)
   @IsNotEmpty()
@@ -384,6 +514,22 @@ class CreateItemBody implements Partial<IBaseItem> {
   @ValidateNested()
   @Type(() => FeedBackFormPayloadValidator)
   feedbackFormDetails?: FeedBackFormPayloadValidator;
+
+  @JSONSchema({
+    description: 'Details specific to peer-reviewed reflection items',
+    type: 'object',
+  })
+  @ValidateIf(o => o.type === ItemType.REFLECTION)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ReflectionDetailsPayloadValidator)
+  reflectionDetails?: ReflectionDetailsPayloadValidator;
+
+  @ValidateIf(o => o.type === ItemType.CASE_STUDY)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CaseStudyDetailsPayloadValidator)
+  caseStudyDetails?: CaseStudyDetailsPayloadValidator;
 }
 
 class UpdateItemBody implements Partial<IBaseItem> {
@@ -430,7 +576,7 @@ class UpdateItemBody implements Partial<IBaseItem> {
     description: 'Type of the item: VIDEO, BLOG, QUIZ or PROJECT',
     example: 'VIDEO',
     type: 'string',
-    enum: ['VIDEO', 'BLOG', 'QUIZ', 'PROJECT', 'FEEDBACK'],
+    enum: ['VIDEO', 'BLOG', 'QUIZ', 'PROJECT', 'FEEDBACK', 'REFLECTION', 'CASE_STUDY'],
   })
   @IsEnum(ItemType)
   @IsNotEmpty()
@@ -486,6 +632,10 @@ class UpdateItemBody implements Partial<IBaseItem> {
         return ProjectDetailsPayloadValidator;
       case ItemType.FEEDBACK:
         return FeedBackFormPayloadValidator;
+      case ItemType.REFLECTION:
+        return ReflectionDetailsPayloadValidator;
+      case ItemType.CASE_STUDY:
+        return CaseStudyDetailsPayloadValidator;
       default:
         throw new Error(`Unknown item type: ${itemType}`);
     }
@@ -495,7 +645,9 @@ class UpdateItemBody implements Partial<IBaseItem> {
     | BlogDetailsPayloadValidator
     | QuizDetailsPayloadValidator
     | ProjectDetailsPayloadValidator
-    | FeedBackFormPayloadValidator;
+    | FeedBackFormPayloadValidator
+    | ReflectionDetailsPayloadValidator
+    | CaseStudyDetailsPayloadValidator;
 }
 
 class MoveItemBody {
@@ -627,6 +779,47 @@ class VersionItemParams {
   @IsMongoId()
   @IsString()
   courseId: string;
+}
+
+/**
+ * `VersionItemParams` requires `courseId`, but this endpoint's route
+ * (`/versions/:versionId/items/:itemId/proctoring`) has no `:courseId`
+ * segment -- reusing it would make every request fail param validation with
+ * a missing-field 400 before the handler ever runs.
+ */
+class ItemProctoringParams {
+  @JSONSchema({
+    title: 'Version ID',
+    description: 'ID of the course version',
+    type: 'string',
+  })
+  @IsMongoId()
+  @IsString()
+  versionId: string;
+
+  @JSONSchema({
+    title: 'Item ID',
+    description: 'ID of the item',
+    type: 'string',
+  })
+  @IsMongoId()
+  @IsString()
+  itemId: string;
+}
+
+class ItemProctoringBody {
+  @JSONSchema({
+    title: 'Item Proctoring Detector Override',
+    description:
+      "Overrides the module/course proctoring detector list for this item. Pass null to clear the override and inherit again. When not null, must list every detector (same shape as the course-level proctoring settings).",
+    type: 'array',
+    nullable: true,
+  })
+  @ValidateIf(o => o.detectors !== null)
+  @ValidateNested({each: true})
+  @containsAllDetectors()
+  @Type(() => DetectorSettingsDto)
+  detectors: IDetectorSettings[] | null;
 }
 
 class DeleteItemParams {
@@ -1078,11 +1271,15 @@ export {
   VideoDetailsPayloadValidator,
   QuizDetailsPayloadValidator,
   BlogDetailsPayloadValidator,
+  ReflectionDetailsPayloadValidator,
+  CaseStudyDetailsPayloadValidator,
   VersionModuleSectionItemParams,
   CourseVersionModuleSectionParams,
   CSVItemBody,
   CSVQuizQuestion,
   VersionItemParams,
+  ItemProctoringParams,
+  ItemProctoringBody,
   DeleteItemParams,
   ItemNotFoundErrorResponse,
   ItemDataResponse,
@@ -1106,6 +1303,8 @@ export const ITEM_VALIDATORS = [
   CSVItemBody,
   CSVQuizQuestion,
   VersionItemParams,
+  ItemProctoringParams,
+  ItemProctoringBody,
   DeleteItemParams,
   ItemNotFoundErrorResponse,
   ItemDataResponse,
